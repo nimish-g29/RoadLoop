@@ -1,99 +1,303 @@
 # RoadLoop
 
-Pothole reports that actually get fixed: crowdsourced detection, plus TinyFish web agents that file, track and escalate.
-Team SpiritX · HackIIITD final.
+**Pothole reports that actually get fixed.**
+
+RoadLoop detects potholes from riders' phones, uses TinyFish web agents to file complaints with the right authority, tracks them, and checks the city's work. If a portal says "closed" but riders still hit the pothole, RoadLoop reopens and escalates the complaint with fresh evidence. A pothole leaves the loop only when riders confirm the repair.
+
+Team SpiritX (NIT Patna) · HackIIITD final, IIIT Delhi
+
+---
+
+## Contents
+
+- [Why RoadLoop](#why-roadloop)
+- [How it works](#how-it-works)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Every-time startup (Windows)](#every-time-startup-windows)
+- [Rider app on a phone](#rider-app-on-a-phone)
+- [Running the demo](#running-the-demo)
+- [Going live with TinyFish](#going-live-with-tinyfish)
+- [Configuration](#configuration)
+- [Project layout](#project-layout)
+- [Design decisions](#design-decisions)
+- [Testing](#testing)
+- [Status and limitations](#status-and-limitations)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Why RoadLoop
+
+India recorded **9,438 pothole-linked road deaths from 2020 to 2024**, rising from 1,555 a year to 2,385. People do report potholes. The loop breaks in three places:
+
+1. **Reports disappear.** NHAI, state PWDs and municipal corporations each run their own portal, mostly with no API and no reliable status updates.
+2. **No prioritisation.** A crater on a busy road counts the same as a dip on a quiet lane.
+3. **"Closed" doesn't mean fixed.** Complaints are marked resolved without anyone checking the road.
+
+Existing apps stop at "reported" and detection startups stop at "mapped". RoadLoop adds the accountability layer: it stops at **verified fixed**.
+
+---
+
+## How it works
+
+```mermaid
+flowchart TD
+    A[Detect<br/>camera · jolt · GPS, blurred on phone] --> B[Score and merge<br/>LOW / MEDIUM / HIGH, one hotspot per 12 m]
+    B --> C[Rider approves<br/>2+ independent riders, explicit consent]
+    C --> D[File complaint<br/>TinyFish Agent returns complaint ID]
+    D --> E[Track status<br/>TinyFish Monitor, SLA timer]
+    E -->|portal says closed| F[Riders re-verify]
+    F -->|2 clean passes| G[Verified fixed]
+    F -->|pothole still there| H[Reopen and escalate]
+    E -->|SLA missed| H
+    H --> E
+```
+
+1. **Detect.** In Drive mode the phone camera runs continuously. A pothole is captured by the on-device YOLO model when installed, or **hands-free by a hard jolt**: the app keeps the last 2.5 s of frames and sends the frame from just before the wheel hit. Riders never touch the phone while moving.
+2. **Score.** Each report gets a severity class from visual size, speed-normalised jolt and road type.
+3. **Merge.** Reports within 12 m become one hotspot. Confidence grows with each **distinct** rider.
+4. **Approve.** A rider who reported the pothole approves filing under their own name.
+5. **File.** A TinyFish agent fills the authority's portal and returns the complaint ID. OTP or CAPTCHA hands control to a human.
+6. **Track.** A TinyFish Monitor watches the status page, with Fetch and polling fallbacks.
+7. **Verify or escalate.** After "closed", riders passing the spot decide: two clean passes verify the fix, sightings reopen and escalate it.
+
+The output is a **ranked engineer dashboard**: severity, crowd confidence, photo evidence, location, complaint ID, portal status, time open, SLA and a full audit timeline.
+
+---
+
+## Architecture
 
 ```
-phone / dashcam clip ──► FastAPI ──► Celery ──► TinyFish (Agent · Search · Fetch · Monitor) ──► grievance portals
-   detector (YOLO)        PostGIS      Redis            ▲                                              │
-   IMU + GPS fusion       priority queue                └──── webhooks: run done / status changed ◄────┘
-   blur all but pothole   lifecycle + audit ──► React + MapLibre engineer dashboard
+Phone app (PWA) ──HTTP──► FastAPI ──► PostgreSQL + PostGIS
+                            │
+                            └─jobs─► Redis ─► Celery worker ─► TinyFish (Agent · Search · Fetch · Monitor)
+                                        ▲          │
+                            Celery beat ┘          └─► Nominatim (reverse geocoding)
+TinyFish ──webhooks──► FastAPI                React + MapLibre dashboard ◄── FastAPI
 ```
 
-## Quick start (offline, no TinyFish key needed)
+| Service | Port | Role |
+|---|---|---|
+| `db` | 5432 | PostgreSQL 16 + PostGIS 3.4 |
+| `redis` | 6379 | Celery job queue |
+| `api` | 8000 | FastAPI: REST API, webhooks, rider app at `/app/`, photos at `/media/` |
+| `worker` | — | Celery: filing, tracking, geocoding |
+| `beat` | — | Schedules status checks (30 min), SLA (60 min), priorities (15 min) |
+| `mock` | 8100 | Offline stand-in for TinyFish plus a fictional grievance portal |
+| `dashboard` | 5173 | React + Vite + MapLibre engineer queue |
 
-```bash
-cp .env.example .env            # TINYFISH_MODE=mock
-docker compose up -d --build
-docker compose run --rm api python -m pytest -q      # run the test suite first
-python scripts/demo.py          # five-act scripted demo; open http://localhost:5173 alongside
-```
+A detailed walkthrough of the backend and database is in the team's slide deck.
 
-The pieces:
-- API docs: http://localhost:8000/docs
-- Demo grievance portal: http://localhost:8100/portal/new
-- Officer console (close tickets, fake a closure): http://localhost:8100/portal/admin
+---
 
-## Volunteer app (phone)
+## Quick start
 
-The volunteer app is a mobile web app served by the API at **`/app`**. There's nothing to install from a store.
-Phones only allow camera and GPS over **https**, so open it through a tunnel:
+Needs Docker Desktop, plus Python 3 and Node 18+ on the host for the demo script and JS tests. Works offline in mock mode, with no TinyFish key.
 
 ```powershell
-winget install --id Cloudflare.cloudflared      # once
-cloudflared tunnel --url http://localhost:8000  # prints https://<random>.trycloudflare.com
+copy .env.example .env                              # TINYFISH_MODE=mock
+docker compose up -d --build
+docker compose ps                                   # all 7 services should be running
+docker compose run --rm api python -m pytest -q     # backend tests
+pip install requests pillow
+python scripts\demo.py --no-pause                   # scripted five-act demo
 ```
 
-1. Open `https://<random>.trycloudflare.com/app/` on the phone, then use "Add to Home Screen".
-2. Set `PUBLIC_BASE_URL` in `.env` to the same https URL. Report photos and TinyFish webhooks use it. Then restart with `docker compose up -d`.
+On macOS or Linux, use `cp` instead of `copy` and `/` instead of `\`.
 
-The app has three tabs:
-- **Drive:** mount the phone, and the camera plus on-device YOLO run 3–5 times per second. The app uploads one redacted frame + GPS + jolt per pothole and nothing else. It also re-checks "portal says fixed" spots automatically. "Mark pothole" lets a rider or passenger tag one by hand. Demo options: play a recorded dashcam video instead of the camera, and simulated GPS.
-- **Report:** take a photo, tap the pothole, pick a size, send. GPS is automatic, and everything except the tapped area is blurred on the phone.
-- **My reports:** live status and complaint IDs. **Approve filing** is the consent step before a TinyFish agent files.
+| Open | URL |
+|---|---|
+| Engineer dashboard | http://localhost:5173 |
+| API docs (Swagger) | http://localhost:8000/docs |
+| Rider app (laptop) | http://localhost:8000/app/ |
+| Fictional portal: new complaint | http://localhost:8100/portal/new |
+| Fictional portal: officer console | http://localhost:8100/portal/admin |
 
-Reports made offline wait on the phone and send when the connection returns.
-**Automatic detection needs a model:** put `pothole.onnx` (320 px export from `detector/train.py`) and `model.json` in `backend/app/static/rider/model/`. Until then, drive mode works with "Mark pothole" only.
-New hotspots are reverse geocoded (road name, address, city, state) through OpenStreetMap Nominatim. Set `GEOCODER=off` to disable this.
+The dashboard runs `npm install` on first start, so give it about a minute.
+
+---
+
+## Every-time startup (Windows)
+
+The tunnel URL changes on every start, so these steps repeat each time.
+
+1. **Open Docker Desktop** and wait for "Engine running".
+2. **Start the tunnel** in its own PowerShell window and leave it open:
+   ```powershell
+   Stop-Process -Name cloudflared -ErrorAction SilentlyContinue
+   cloudflared tunnel --url http://localhost:8000
+   ```
+   Copy the printed `https://<words>.trycloudflare.com` URL.
+3. **Update `.env`.** Change only this line, with no `/app/` and no trailing slash, and keep the comment below it on its own line:
+   ```
+   PUBLIC_BASE_URL=https://<words>.trycloudflare.com
+   ```
+4. **Start the stack** in the repo folder:
+   ```powershell
+   git pull
+   docker compose up -d --build
+   docker compose up -d --force-recreate api worker beat   # reload .env
+   docker compose ps
+   ```
+5. **On the phone,** open `https://<words>.trycloudflare.com/app/`.
+
+To stop: `docker compose down`, then close the cloudflared window. **Never** run `docker compose down -v`, which deletes the database.
+
+---
+
+## Rider app on a phone
+
+The rider app is a progressive web app served by the API, so nothing is installed from a store. Phones only allow camera, GPS and motion sensors over **https**, which is why it goes through the tunnel above.
+
+1. Open `https://<tunnel>/app/`, allow camera, location and motion, then **Add to Home Screen**.
+2. Register with a name and a 10-digit mobile number. Portals require a number; it is used only for complaints the rider approves.
+
+**Tabs**
+
+- **Drive.** Mount the phone facing the road and tap Start. Potholes are captured hands-free by the model or by a jolt (above 10 km/h, at most one per 4 s). Nothing is uploaded unless a pothole is seen: then one blurred frame, GPS and jolt strength. With the model installed, it also re-checks "portal says fixed" spots automatically. **Mark pothole (passenger)** tags one by hand. Demo options: play a recorded dashcam video, or simulate GPS.
+- **Report.** Take a photo, tap the pothole, pick a size, send. Everything except the tapped area is blurred on the phone, and re-encoding strips EXIF.
+- **My reports.** Live status and complaint IDs. **Approve filing** is the consent step before an agent files.
+
+Reports made offline wait on the phone and upload when the connection returns.
+
+**Automatic detection needs a model.** Put `pothole.onnx` (a 320 px export from `detector/train.py`) and `model.json` in `backend/app/static/rider/model/`. Until then, Drive mode captures potholes by jolt and by the passenger button.
+
+---
+
+## Running the demo
+
+### Scripted (recommended for judges)
+
+```powershell
+python scripts\demo.py
+```
+Press Enter between acts while narrating, with the dashboard open alongside. `--no-pause` runs straight through.
+
+1. Six riders pass a crater → one HIGH hotspot.
+2. A rider approves → the agent files on the fictional portal → complaint ID.
+3. The officer closes the ticket without fixing anything.
+4. The next rider still detects the crater → reopened and escalated with evidence.
+5. The escalation is closed and two riders pass a clean road → **verified fixed**.
+
+### Live, from phones
+
+1. Report the same pothole from **two different riders** (two phones or two registrations). The hotspot is confirmed.
+2. One of them taps **Approve filing** in My reports. A complaint ID appears on the dashboard.
+3. In the officer console, click **Closed** on that complaint, then **ticking monitors** (or **Check portals now** on the dashboard). The hotspot shows "Portal says closed: re-checking".
+4. **To show a false closure:** two riders report the pothole again → reopened and escalated.
+5. **To show a verified repair:** send two clean passes from two **different** riders in Swagger (`POST /v1/hotspots/{hotspot_id}/passes`):
+   ```json
+   { "rider_id": "<rider id>", "lat": 28.545, "lon": 77.273 }
+   ```
+   Create riders with `POST /v1/riders` (`{"display_name": "Verifier One", "phone": "9999900001", "consent": true}`), and find the hotspot ID and coordinates with `GET /v1/hotspots`. Passes must be within 25 m of the hotspot.
+
+The fictional portal keeps complaints in memory, so restarting the `mock` container clears its list. Don't restart it mid-demo.
+
+---
 
 ## Going live with TinyFish
 
-1. Get a key at agent.tinyfish.ai/api-keys. Set `TINYFISH_MODE=live` and `TINYFISH_API_KEY` in `.env`.
-2. TinyFish must reach your webhooks over **https**. Run `cloudflared tunnel --url http://localhost:8000`, or ngrok, and set `PUBLIC_BASE_URL` to the tunnel URL. Without https, RoadLoop falls back to polling and skips Monitors.
-3. For a live, CAPTCHA-free demo, also tunnel the mock portal (port 8100). Replace `{MOCK}` for `demo` in `backend/app/tinyfish/portals.json` with that public URL. The **real** TinyFish agent then fills a real web form you control.
-4. For real portals, walk each one with TinyFish first. Then fill its entry in `portals.json` (filing URL, status mode, OTP) and set `"verified": true`.
+1. Get a key at agent.tinyfish.ai/api-keys. In `.env`, set `TINYFISH_MODE=live` and `TINYFISH_API_KEY`.
+2. TinyFish must reach your webhooks over **https**, so `PUBLIC_BASE_URL` must be the tunnel URL. Without https, RoadLoop polls instead and skips Monitors.
+3. For a CAPTCHA-free live demo, also tunnel the fictional portal (port 8100) and replace `{MOCK}` for `demo` in `backend/app/tinyfish/portals.json` with that public URL. The real agent then fills a real form you control.
+4. For real portals, walk each one with TinyFish first, fill its entry in `portals.json` (filing URL, status mode, OTP), and set `"verified": true`.
 
-## What's where
+Never send test or fake complaints to a real government portal.
+
+---
+
+## Configuration
+
+`.env` (copied from `.env.example`, never committed):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TINYFISH_MODE` | `mock` | `mock` uses the local mock service; `live` calls TinyFish |
+| `TINYFISH_API_KEY` | empty | Needed for live mode |
+| `PUBLIC_BASE_URL` | `http://localhost:8000` | Public https base for webhooks and photo links. No `/app/`, no trailing slash |
+| `WEBHOOK_TOKEN` | — | Secret path segment protecting webhooks. Set a long random string |
+| `SLA_DAYS` | `7` | Days before an open complaint is escalated |
+| `MONITOR_CRON` | every 6 h, IST | Schedule for TinyFish Monitors |
+| `GEOCODER` | `nominatim` | `off` disables reverse geocoding |
+
+Tuning knobs, read by `backend/app/config.py`: `MIN_RIDERS=2`, `MIN_CONFIDENCE=0.85`, `MERGE_RADIUS_M=12`, `VERIFY_RADIUS_M=25`, `MAX_ESCALATIONS=3`. These are reasoned defaults, not field-tested values.
+
+---
+
+## Project layout
 
 | Path | What |
 |---|---|
-| `backend/app/core/` | Pure logic: geohash dedupe, severity / confidence / priority, lifecycle state machine, portal-status parser (English and Hindi), verification rule, authority routing |
-| `backend/app/tinyfish/` | TinyFish client (matches docs.tinyfish.ai, Oct 2026), agent goals and output schemas, portal registry |
+| `backend/app/core/` | Pure logic: geohash merge, severity / confidence / priority, state machine, portal-status parser (English and Hindi), verification rule, authority routing |
 | `backend/app/services/workflow.py` | The loop: ingest → merge → confirm → approve → file → track → verify → escalate |
-| `backend/app/worker.py` | Celery tasks and beat (status checks every 30 min, SLA every hour, priorities every 15 min) |
+| `backend/app/tinyfish/` | TinyFish client, agent goals and output schemas, portal registry (`portals.json`) |
 | `backend/app/main.py` | REST API for the rider app and dashboard, plus webhooks |
-| `mock_tinyfish/` | Same REST shapes as TinyFish, plus the fictional demo portal |
-| `detector/` | YOLO ONNX inference, IMU/GPS fusion, per-pass debouncing, privacy redaction, dashcam CLI, training/export |
-| `backend/app/static/rider/` | Volunteer mobile web app: drive mode (camera + onnxruntime-web YOLO + motion + GPS), photo reports, my reports/approval, offline queue |
+| `backend/app/worker.py` | Celery tasks and beat schedule |
+| `backend/app/models.py` | Tables: riders, detections, hotspots, complaints, pass_observations, agent_runs, audit_events |
+| `backend/sql/001_postgis.sql` | PostGIS geography column, spatial index, priority index |
+| `backend/app/static/rider/` | Rider PWA: drive mode, hands-free jolt capture, photo reports, approvals, offline queue |
 | `dashboard/` | React + MapLibre engineer queue: ranked list, map, SLA clocks, complaint IDs, audit timeline |
-| `scripts/demo.py` | The judge demo, scripted |
+| `detector/` | YOLO ONNX inference, IMU/GPS fusion, privacy redaction, dashcam CLI, training and export |
+| `mock_tinyfish/` | Same REST shapes as TinyFish, plus the fictional portal and officer console |
+| `scripts/demo.py` | The scripted judge demo |
 
-## Design decisions worth saying out loud
+---
 
-- **Severity classes, not millimetres.** Area + speed-normalised jolt + road type. A hotspot's severity is the 70th percentile of its detections, so one bad frame can't escalate it.
-- **Distinct riders, not passes.** Confidence is a noisy-OR over riders. Filing needs ≥2 riders and ≥0.85 confidence.
-- **Consent is enforced in code.** Only a rider who reported the pothole can approve filing, under their own name. Agents stop on OTP/CAPTCHA and return `needs_human`.
-- **TinyFish usage is quota-aware.**
-  - One Page Monitor per open complaint, deleted on closure (there's a per-account cap).
-  - If a Monitor can't be created, it falls back to batched Fetch (10 URLs per call).
-  - Login-only trackers get scheduled Agent lookups instead.
-- **Webhooks plus polling.** Both paths are idempotent, because TinyFish webhook delivery is best effort.
-- **Physical evidence beats a "Closed" label.** 2 clear passes means verified fixed. 2 sightings, or 1 strong detection with a jolt, reopens the ticket and escalates with the original complaint ID.
+## Design decisions
 
-## Status
+- **Severity classes, not millimetres.** Monocular depth is approximate, so severity fuses visible area, speed-normalised jolt and road type. A hotspot's score is the 70th percentile of its detections, so one bad frame can't escalate it.
+- **Distinct riders, not passes.** Confidence is a noisy-OR over riders' best detections. Filing needs at least 2 riders and confidence 0.85. One phone passing ten times is one witness.
+- **Consent enforced in code.** Only a rider who reported the pothole can approve filing, under their own name. Agents stop on OTP or CAPTCHA and return `needs_human`.
+- **Hands-free capture.** A jolt above 10 km/h picks the buffered frame from just before impact, so riders never handle the phone while moving.
+- **Physical evidence beats a "Closed" label.** Two clean passes verify a fix. Two sightings, or one detection with confidence ≥ 0.8 and jolt ≥ 0.5 g, reopen the ticket and escalate it citing the original complaint ID.
+- **Strict state machine.** All allowed transitions live in one table; anything else raises an error. Every transition writes an audit event.
+- **Idempotent everywhere.** Upload retries return the same row (`client_id`), agent runs are processed once (`handled`), and webhooks and polling are both safe to repeat.
+- **Quota-aware TinyFish use.** One Monitor per open complaint, deleted on closure. If a Monitor can't be created, batched Fetch (10 URLs per call); login-only trackers get scheduled Agent lookups.
+- **Privacy by default.** Blurred and EXIF-stripped on the phone, no continuous video uploaded, phone numbers used only for approved complaints.
+
+---
+
+## Testing
+
+```powershell
+docker compose run --rm api python -m pytest -q    # core logic, TinyFish client vs mock, DB/API flow
+node --test backend/tests/js/logic.test.mjs         # rider app logic: YOLO decode, tracker, jolt capture
+python scripts\demo.py --no-pause                    # end-to-end against the running stack
+```
+
+---
+
+## Status and limitations
 
 | Part | State |
 |---|---|
-| Core logic, TinyFish client vs mock, detector pipeline | Tested here (32 tests) |
-| DB/API flow (`tests/test_flow.py`), Celery, PostGIS SQL, dashboard | Written and syntax-checked, **not yet run**: the build sandbox had no PyPI/npm access. Run the test suite first. |
-| Pothole weights | Not included. Run `detector/train.py` on a pothole dataset plus your own Delhi/Patna frames. |
-| Volunteer web app | Node unit tests (8) and a headless-Chromium end-to-end test (fake camera + GPS) pass against a stub API. Not yet run against the real stack or on a real phone. |
+| Full stack in Docker, scripted demo, dashboard | Working on a team machine (mock TinyFish) |
+| Rider app on a real phone through a tunnel | Working: registration, reports, approval, filing, tracking |
+| Hands-free jolt capture | JS unit tests pass (11 total); thresholds not yet tuned on real rides |
+| Live TinyFish | **Not yet verified.** Runs against the mock service |
+| Pothole model weights | **Not included.** Train with `detector/train.py` |
+| Real portal entries in `portals.json` | Unverified |
+| iPhone Safari | Untested |
 
-## Day-one checklist
+**Known limitations**
 
-- [ ] `docker compose run --rm api python -m pytest -q` passes
-- [ ] `python scripts/demo.py --no-pause` completes in mock mode
-- [ ] TinyFish key works: a `run` on the tunnelled demo portal returns a complaint ID
-- [ ] Find out whether the agent can **upload the photo** (the docs don't say). If not, the photo link stays in the description.
-- [ ] Walk one real portal (CPGRAMS or a city portal) and note where OTP/login blocks
-- [ ] Train the detector; record 2-3 dashcam clips with GPS and IMU logs (e.g. Physics Toolbox / GPSLogger apps)
+- No database migrations yet; tables come from SQLAlchemy `create_all`.
+- `/v1/admin/run/{job}` has no authentication.
+- Two potholes within 12 m can merge into one hotspot.
+- A jolt alone can't tell a pothole from a speed breaker; the photo and the two-rider rule filter this until the model is trained.
+- Without the model, clean verification passes can't come from the phone; use the API as in [Running the demo](#running-the-demo).
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Phone shows Cloudflare **Error 1033** | The tunnel is closed. Restart cloudflared and update `PUBLIC_BASE_URL` |
+| Dashboard photos show "Blurred hazard frame" text | `PUBLIC_BASE_URL` is wrong or stale. Check it has no `/app/` and no comment on the same line, then `docker compose up -d --force-recreate api worker beat` |
+| Phone says "The server was reset. Please register again" | Fresh database (new folder or volume). Register again |
+| Camera or GPS doesn't work on the phone | Use the **https** tunnel link and check the browser's site permissions |
+| A service isn't running | `docker compose logs <service> --tail 50` |
+| VS Code shows red errors in `001_postgis.sql` | The SQL Server extension is checking Postgres syntax. Switch the file's language mode or disable that extension for this workspace |
+| `git diff` ends with `:` | It's the pager. Press `q` |
