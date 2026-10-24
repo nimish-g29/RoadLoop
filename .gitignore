@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+dist/
+media/
+*.onnx
+*.tflite
+*.pt
+detector/runs/
+detector/datasets/
+.DS_Store
+backend/celerybeat-schedule
