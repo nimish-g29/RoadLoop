@@ -4,7 +4,7 @@
 // model running and seeing nothing sends a clear pass.
 import { api } from "./api.js";
 import { snapshot, redact, toJpeg } from "./redact.js";
-import { PassTracker, joltWindow } from "./tracker.js";
+import { FrameRing, JoltTrigger, PassTracker, bumpLookback, joltWindow } from "./tracker.js";
 import { clamp, haversine, uuid } from "./util.js";
 import { PotholeModel } from "./yolo.js";
 
@@ -31,6 +31,9 @@ export class DriveSession extends EventTarget {
     this.verify = new Map();
     this.stats = { fps: 0, inferMs: 0, sent: 0, passes: 0, boxes: 0, jolt: 0 };
     this._frames = [];
+    this.recent = new FrameRing(2.5); // last few seconds of frames for hands-free capture
+    this.bump = new JoltTrigger(config?.bump || {});
+    this.lastAutoT = -Infinity;
   }
 
   _emitEvt(type, detail) {
@@ -137,7 +140,12 @@ export class DriveSession extends EventTarget {
       }
       this.stats.boxes = boxes.length;
       this._draw(boxes);
-      this.tracker.update(t, boxes, () => snapshot(v)).forEach((tr) => this._scheduleEmit(tr, "auto"));
+      this.tracker.update(t, boxes, () => snapshot(v)).forEach((tr) => {
+        this.lastAutoT = tr.lastT;
+        this._scheduleEmit(tr, "auto");
+      });
+      this.recent.push(t, snapshot(v, 800));
+      this._checkBump(t);
       this._checkVerify(boxes.length > 0);
       this._frames.push(t);
       while (this._frames.length && t - this._frames[0] > 2) this._frames.shift();
@@ -167,6 +175,27 @@ export class DriveSession extends EventTarget {
     }
   }
 
+  /**
+   * Hands-free capture: a hard jolt means the wheel just hit something. Send the frame from
+   * just before the hit (when the pothole was in view ahead), located where the jolt happened.
+   * If the model is running and already tracking it, the model's report wins (no duplicate).
+   */
+  _checkBump(t) {
+    if (!this.motion.hasData) return;
+    const fix = this.gps.track.last;
+    const speed = fix?.speedKmh ?? null;
+    const hit = this.bump.check(this.motion.buf, t, speed);
+    if (!hit) return;
+    if (this.model && (this.tracker.active || t - this.lastAutoT < 3)) return;
+    const f = this.recent.at(hit.t - bumpLookback(speed));
+    const v = this.video;
+    if (!f || !v.videoWidth) return;
+    const W = v.videoWidth, H = v.videoHeight;
+    const box = { x1: W * 0.25, y1: H * 0.55, x2: W * 0.75, y2: H * 0.95 }; // road just ahead
+    this._scheduleEmit({ bestT: f.t, locT: hit.t, area: 0.035, conf: 0.6, box, frame: f.frame }, "jolt");
+    this._emitEvt("bump", { g: hit.g });
+  }
+
   // ------------------------------------------------------------------- uploads
   /** Rider/passenger taps "Mark pothole": use the current frame, lower-centre region. */
   mark() {
@@ -179,14 +208,14 @@ export class DriveSession extends EventTarget {
   }
 
   _scheduleEmit(tr, source) {
-    const fix = this.gps.track.at(tr.bestT);
+    const fix = this.gps.track.at(tr.locT ?? tr.bestT);
     const [a, b] = joltWindow(tr.bestT, fix?.speedKmh);
     const delay = Math.max(0, (b - now()) * 1000); // wait until the wheel has hit it
     setTimeout(() => this._emitDetection(tr, source, a, b).catch((e) => this._emitEvt("error", e.message)), delay);
   }
 
   async _emitDetection(tr, source, a, b) {
-    const fix = this.gps.track.at(tr.bestT);
+    const fix = this.gps.track.at(tr.locT ?? tr.bestT); // jolt: where the wheel hit it
     if (!fix) {
       this._emitEvt("error", "Pothole seen but no GPS fix yet: not sent.");
       return;

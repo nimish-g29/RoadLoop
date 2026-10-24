@@ -44,6 +44,61 @@ export class PassTracker {
   }
 }
 
+// ------------------------------------------------------------- hands-free capture
+// The rider never touches the phone: the camera keeps the last few seconds of frames,
+// and a hard jolt picks the frame from just before the wheel hit the pothole.
+
+/** Rolling buffer of recent frames: [{t, frame}], oldest first. */
+export class FrameRing {
+  constructor(keepS = 2.5) {
+    this.keepS = keepS;
+    this.items = [];
+  }
+
+  push(t, frame) {
+    this.items.push({ t, frame });
+    while (this.items.length && t - this.items[0].t > this.keepS) this.items.shift();
+  }
+
+  /** Latest frame taken at or before t (the oldest one if t is before the buffer). */
+  at(t) {
+    let best = null;
+    for (const it of this.items) {
+      if (it.t <= t) best = it;
+      else break;
+    }
+    return best || this.items[0] || null;
+  }
+}
+
+/** Seconds before the jolt when the pothole was ~lookaheadM ahead (in view of the camera). */
+export function bumpLookback(speedKmh, lookaheadM = 8) {
+  const v = Math.max((speedKmh || 20) / 3.6, 1);
+  return Math.min(lookaheadM / v, 2);
+}
+
+/**
+ * Fires once per hard bump. Ignores bumps while stopped or crawling (phone being handled,
+ * getting on the bike) and repeats within cooldownS (one pothole shakes for a while).
+ * speedKmh = null means the phone gives no GPS speed: allowed, the crowd check filters noise.
+ */
+export class JoltTrigger {
+  constructor({ thresholdG = 0.5, minSpeedKmh = 10, cooldownS = 4, windowS = 0.3 } = {}) {
+    Object.assign(this, { thresholdG, minSpeedKmh, cooldownS, windowS });
+    this.lastFire = -Infinity;
+  }
+
+  /** buf: JoltBuffer. Returns {t, g} when a bump fires, else null. */
+  check(buf, t, speedKmh) {
+    if (t - this.lastFire < this.cooldownS) return null;
+    if (speedKmh != null && speedKmh < this.minSpeedKmh) return null;
+    const g = buf.peak(t - this.windowS, t);
+    if (g == null || g < this.thresholdG) return null;
+    this.lastFire = t;
+    return { t, g };
+  }
+}
+
 /** When does the wheel reach a pothole seen biggest at bestT? ~lookaheadM metres later. */
 export function joltWindow(bestT, speedKmh, lookaheadM = 8) {
   const v = Math.max((speedKmh || 20) / 3.6, 1);

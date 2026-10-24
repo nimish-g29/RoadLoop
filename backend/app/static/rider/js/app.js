@@ -77,7 +77,7 @@ function mountDrive(root) {
   const modelNote = h("p", { class: "model-note", hidden: true });
   const startBtn = h("button", { class: "btn primary big" }, "Start driving");
   const stopBtn = h("button", { class: "btn danger big", hidden: true }, "Stop");
-  const markBtn = h("button", { class: "btn mark big", hidden: true, "aria-label": "Mark a pothole now" }, "Mark pothole");
+  const markBtn = h("button", { class: "btn mark big", hidden: true, "aria-label": "Mark a pothole now" }, "Mark pothole (passenger)");
 
   // Demo / testing options
   const srcCam = h("input", { type: "radio", name: "src", value: "camera", checked: true });
@@ -100,6 +100,7 @@ function mountDrive(root) {
     h("ul", { class: "how" },
       h("li", {}, "Mount the phone facing the road, plugged in to charge."),
       h("li", {}, "The camera stays on, but nothing is recorded or uploaded unless a pothole is seen."),
+      h("li", {}, "Hands-free: hit a pothole and it is captured automatically. Never touch the phone while riding."),
       h("li", {}, "Each pothole sends one photo (everything else blurred), its location and how hard you hit it."),
     ),
     modelNote, options,
@@ -114,7 +115,7 @@ function mountDrive(root) {
     modelNote.className = `model-note ${kind}`;
   };
   if (!state.config?.model_url) {
-    setNote("No pothole model installed on the server yet, so automatic detection is off. You can still drive and tap “Mark pothole”.", "warn");
+    setNote("No pothole model installed yet: potholes are captured hands-free when you hit one (jolt). A passenger can also tap “Mark pothole”.", "warn");
   }
 
   gps.onChange((f, e) => {
@@ -146,6 +147,7 @@ function mountDrive(root) {
       else if (m === "error") setNote(`Model failed: ${e.detail.error}. Tap “Mark pothole” instead.`, "warn");
     });
     session.addEventListener("detection", () => toast("Pothole captured ✓", "ok"));
+    session.addEventListener("bump", () => navigator.vibrate?.([40, 60, 40]));
     session.addEventListener("pass", () => toast("Re-checked a repaired spot: road looks clear ✓", "ok"));
     session.addEventListener("error", (e) => toast(e.detail, "error"));
     session.addEventListener("state", (e) => {

@@ -76,7 +76,7 @@ class DetectionIn:
     state_key: str | None = None
     captured_at: datetime | None = None
     client_id: str | None = None
-    source: str = "auto"          # auto = drive-mode model, manual = photo report
+    source: str = "auto"          # auto = drive-mode model, manual = photo report, jolt = hands-free bump capture
 
 
 def ingest_detection(s: Session, d: DetectionIn, photo: str | None) -> tuple[Detection, list[Job]]:

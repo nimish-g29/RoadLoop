@@ -80,7 +80,7 @@ class Detection(Base):
     score: Mapped[float] = mapped_column(Float)
     severity: Mapped[str] = mapped_column(String(10))
     photo: Mapped[str | None] = mapped_column(String(300))
-    source: Mapped[str] = mapped_column(String(10), default="auto")       # auto | manual
+    source: Mapped[str] = mapped_column(String(10), default="auto")       # auto | manual | jolt
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     hotspot: Mapped[Hotspot | None] = relationship(back_populates="detections")

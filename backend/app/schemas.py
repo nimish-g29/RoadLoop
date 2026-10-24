@@ -35,7 +35,7 @@ class DetectionMeta(BaseModel):
     state_key: str | None = None
     captured_at: datetime | None = None
     client_id: str | None = Field(default=None, max_length=64)
-    source: Literal["auto", "manual"] = "auto"
+    source: Literal["auto", "manual", "jolt"] = "auto"
 
 
 class DetectionOut(BaseModel):

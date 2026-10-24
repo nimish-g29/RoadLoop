@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { letterboxParams, decode, nms, toCHW } from "../../app/static/rider/js/yolo.js";
-import { PassTracker, joltWindow } from "../../app/static/rider/js/tracker.js";
+import { FrameRing, JoltTrigger, PassTracker, bumpLookback, joltWindow } from "../../app/static/rider/js/tracker.js";
 import { GpsTrack, JoltBuffer } from "../../app/static/rider/js/sensors.js";
 import { haversine, median } from "../../app/static/rider/js/util.js";
 
@@ -84,4 +84,30 @@ test("gps track: interpolation and derived speed", () => {
 test("util", () => {
   assert.ok(Math.abs(haversine(28.6139, 77.209, 28.6139, 77.21) - 97.7) < 1.5);
   assert.equal(median([3, 1, 2, 10]), 2.5);
+});
+
+test("hands-free: frame ring keeps ~2.5 s and returns the frame before a time", () => {
+  const ring = new FrameRing(2.5);
+  for (let i = 0; i <= 25; i++) ring.push(i / 5, `f${(i / 5).toFixed(1)}`);
+  assert.equal(ring.items[0].t, 2.6); // frames every 0.2 s: 2.4 is 2.6 s old, so it is dropped
+  assert.ok(5 - ring.items[0].t <= 2.5);
+  assert.equal(ring.at(4.05).frame, "f4.0");
+  assert.equal(ring.at(1).frame, ring.items[0].frame); // before the buffer: oldest frame
+});
+
+test("hands-free: look back to when the pothole was ~8 m ahead, capped at 2 s", () => {
+  assert.ok(Math.abs(bumpLookback(36) - 0.8) < 1e-9); // 10 m/s
+  assert.equal(bumpLookback(5), 2);
+});
+
+test("hands-free: jolt trigger fires once per bump, not when slow or quiet", () => {
+  const buf = new JoltBuffer();
+  for (let t = 0; t < 10; t += 0.02) buf.push(t, 1.0 + (t > 5 && t < 5.1 ? 1.2 : 0)); // one hard hit at 5 s
+  const trig = new JoltTrigger();
+  assert.equal(trig.check(buf, 3, 30), null);            // smooth road
+  assert.equal(trig.check(buf, 5.1, 5), null);           // crawling: ignored
+  const hit = trig.check(buf, 5.1, 30);
+  assert.ok(hit && hit.g > 1);
+  assert.equal(trig.check(buf, 5.12, 30), null);         // same pothole: cooldown
+  assert.ok(new JoltTrigger().check(buf, 5.1, null));    // no GPS speed: still allowed
 });
