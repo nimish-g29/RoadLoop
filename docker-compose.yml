@@ -1,0 +1,81 @@
+# RoadLoop local stack.
+#   docker compose up --build              -> real TinyFish (needs TINYFISH_API_KEY in .env)
+#   TINYFISH_MODE=mock docker compose up   -> offline demo against mock_tinyfish
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: roadloop
+      POSTGRES_PASSWORD: roadloop
+      POSTGRES_DB: roadloop
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U roadloop"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://roadloop:roadloop@db:5432/roadloop
+      REDIS_URL: redis://redis:6379/0
+    ports: ["8000:8000"]
+    volumes:
+      - ./backend:/app
+      - ./mock_tinyfish:/mock_tinyfish:ro   # lets the API container run the client tests
+      - media:/media
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://roadloop:roadloop@db:5432/roadloop
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+      - media:/media
+    depends_on: [api]
+    command: celery -A app.worker.celery_app worker -l info --concurrency 2
+
+  beat:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://roadloop:roadloop@db:5432/roadloop
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+    depends_on: [api]
+    command: celery -A app.worker.celery_app beat -l info
+
+  # Offline stand-in for TinyFish + a fictional grievance portal for demos.
+  mock:
+    build: ./mock_tinyfish
+    environment:
+      ROADLOOP_API: http://api:8000
+    ports: ["8100:8100"]
+
+  dashboard:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - ./dashboard:/app
+    environment:
+      VITE_API_URL: http://localhost:8000
+    ports: ["5173:5173"]
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+
+volumes:
+  pgdata:
+  media:
