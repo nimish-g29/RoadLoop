@@ -1,0 +1,87 @@
+// node --test backend/tests/js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { letterboxParams, decode, nms, toCHW } from "../../app/static/rider/js/yolo.js";
+import { PassTracker, joltWindow } from "../../app/static/rider/js/tracker.js";
+import { GpsTrack, JoltBuffer } from "../../app/static/rider/js/sensors.js";
+import { haversine, median } from "../../app/static/rider/js/util.js";
+
+function fakeOutput(boxes, n = 50, nc = 1) {
+  const C = 4 + nc, data = new Float32Array(C * n);
+  boxes.forEach(([cx, cy, w, h, c], i) => {
+    data[0 * n + i] = cx; data[1 * n + i] = cy; data[2 * n + i] = w; data[3 * n + i] = h; data[4 * n + i] = c;
+  });
+  return { data, dims: [1, C, n] };
+}
+
+test("letterbox + decode match the Python implementation", () => {
+  const lb = letterboxParams(1280, 720, 640);
+  assert.equal(lb.r, 0.5);
+  assert.deepEqual([lb.padX, lb.padY], [0, 140]);
+  const { data, dims } = fakeOutput([[250, 415, 100, 50, 0.9], [252, 416, 98, 52, 0.8], [500, 600, 40, 20, 0.2]]);
+  const boxes = decode(data, dims, lb, 1280, 720);
+  assert.equal(boxes.length, 1);
+  assert.ok(Math.abs(boxes[0].x1 - 400) < 1 && Math.abs(boxes[0].y2 - 600) < 1);
+});
+
+test("decode handles transposed exports", () => {
+  const n = 200, C = 5, data = new Float32Array(n * C);
+  data.set([320, 320, 64, 64, 0.7], 0); // row 0 in [N, C] layout
+  const boxes = decode(data, [1, n, C], letterboxParams(640, 640, 640), 640, 640);
+  assert.equal(boxes.length, 1);
+});
+
+test("nms keeps different classes", () => {
+  const a = { x1: 0, y1: 0, x2: 10, y2: 10, conf: 0.9, cls: 0 };
+  assert.equal(nms([a, { ...a, conf: 0.8 }, { ...a, cls: 1, conf: 0.5 }]).length, 2);
+});
+
+test("toCHW layout", () => {
+  const rgba = new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 0, 255]);
+  const out = toCHW(rgba, 2);
+  assert.deepEqual(Array.from(out.slice(0, 4)), [1, 0, 0, 0]); // R plane
+  assert.deepEqual(Array.from(out.slice(4, 8)), [0, 1, 0, 0]); // G plane
+});
+
+test("tracker: one event per pothole, biggest frame kept, flicker ignored", () => {
+  const tr = new PassTracker(1280, 720);
+  let events = [];
+  for (let i = 0; i < 8; i++) {
+    const s = 40 + 10 * i;
+    events.push(...tr.update(i * 0.2, [{ x1: 600, y1: 400 + 10 * i, x2: 600 + s, y2: 400 + 10 * i + s / 2, conf: 0.6 + i * 0.02 }],
+      () => `frame${i}`));
+  }
+  events.push(...tr.update(3.0, []));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].hits, 8);
+  assert.equal(events[0].frame, "frame7");
+  tr.update(5.0, [{ x1: 100, y1: 600, x2: 150, y2: 630, conf: 0.5 }]);
+  assert.deepEqual(tr.update(7.0, []), []);
+  const [a, b] = joltWindow(10, 36);
+  assert.equal(a, 10);
+  assert.ok(Math.abs(b - 11.8) < 1e-9); // 8 m at 10 m/s + 1 s
+});
+
+test("jolt buffer: gravity removed, hit found", () => {
+  const j = new JoltBuffer();
+  for (let t = 0; t < 10; t += 0.02) j.push(t, 1 + 0.03 * Math.sin(t) + (t > 5 && t < 5.06 ? 0.8 : 0));
+  assert.ok(j.peak(4.5, 5.5) > 0.7);
+  assert.ok(j.peak(1, 3) < 0.1);
+  assert.equal(j.peak(20, 21), null);
+});
+
+test("gps track: interpolation and derived speed", () => {
+  const g = new GpsTrack();
+  g.push({ t: 0, lat: 28.0, lon: 77.0, accuracy: 5 });
+  g.push({ t: 10, lat: 28.0009, lon: 77.0, accuracy: 8 }); // ~100 m in 10 s
+  assert.ok(Math.abs(g.last.speedKmh - 36) < 1);
+  const mid = g.at(5);
+  assert.ok(Math.abs(mid.lat - 28.00045) < 1e-9);
+  assert.equal(mid.accuracy, 8);
+  assert.equal(g.at(-1).lat, 28.0);
+});
+
+test("util", () => {
+  assert.ok(Math.abs(haversine(28.6139, 77.209, 28.6139, 77.21) - 97.7) < 1.5);
+  assert.equal(median([3, 1, 2, 10]), 2.5);
+});

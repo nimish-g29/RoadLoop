@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1F2933" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>RoadLoop</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon-192.png" />
+    <link rel="apple-touch-icon" href="icon-192.png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <p id="secure-warning" class="secure-warning" hidden>
+      This page is open over plain http, so the camera and GPS are blocked. Open the https tunnel link instead.
+    </p>
+
+    <main id="onboarding" hidden></main>
+
+    <div id="app" hidden>
+      <header class="topbar">
+        <div class="brand"><span class="logo">◎</span> RoadLoop</div>
+        <div class="right">
+          <span id="queue-badge" class="badge" hidden></span>
+          <span id="net" class="net" title="Connection"></span>
+          <span id="who" class="who"></span>
+        </div>
+      </header>
+
+      <div id="view-drive" class="view"></div>
+      <div id="view-report" class="view" hidden></div>
+      <div id="view-reports" class="view" hidden></div>
+
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-tab="drive" aria-selected="true"><span aria-hidden="true">🚗</span>Drive</button>
+        <button role="tab" data-tab="report" aria-selected="false"><span aria-hidden="true">📷</span>Report</button>
+        <button role="tab" data-tab="reports" aria-selected="false"><span aria-hidden="true">📋</span>My reports</button>
+      </nav>
+    </div>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

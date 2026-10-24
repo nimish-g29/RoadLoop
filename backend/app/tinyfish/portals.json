@@ -1,0 +1,58 @@
+{
+  "_readme": "One entry per authority. A new city = a new entry here (goal text + URLs), no new code. 'verified' means a human on the team has walked the flow with TinyFish. Fill the TODO entries after testing each portal on day one.",
+  "demo": {
+    "name": "Demo Municipal Grievance Portal (fictional, served by mock_tinyfish)",
+    "verified": true,
+    "filing_url": "{MOCK}/portal/new",
+    "status": {"mode": "public_page", "url_template": "{MOCK}/portal/status/{complaint_id}"},
+    "requires_otp": false,
+    "category_hint": "Roads > Potholes",
+    "escalate_to": "demo_escalation"
+  },
+  "demo_escalation": {
+    "name": "Demo Zonal Commissioner Desk (fictional)",
+    "verified": true,
+    "filing_url": "{MOCK}/portal/escalate",
+    "status": {"mode": "public_page", "url_template": "{MOCK}/portal/status/{complaint_id}"},
+    "requires_otp": false,
+    "category_hint": "Escalation of unresolved grievance",
+    "escalate_to": null
+  },
+  "cpgrams": {
+    "name": "CPGRAMS (Centralised Public Grievance Redress and Monitoring System)",
+    "verified": false,
+    "filing_url": "https://pgportal.gov.in/",
+    "status": {"mode": "agent_lookup", "url": "https://pgportal.gov.in/"},
+    "requires_otp": true,
+    "category_hint": "Ministry of Road Transport and Highways / State Government > Roads",
+    "escalate_to": null,
+    "notes": "Needs citizen login + OTP. File with a browser profile the rider signed into, or hand off to the rider."
+  },
+  "nhai": {
+    "name": "NHAI (national highways)",
+    "verified": false,
+    "filing_url": "TODO: NHAI web grievance URL (Rajmargyatra is app-first; confirm a web route)",
+    "status": {"mode": "agent_lookup", "url": "TODO"},
+    "requires_otp": true,
+    "category_hint": "Highway > Potholes / Road condition",
+    "escalate_to": "cpgrams"
+  },
+  "city_delhi": {
+    "name": "Delhi municipal grievance portal",
+    "verified": false,
+    "filing_url": "TODO: confirm the MCD / PWD Delhi complaint URL on day one",
+    "status": {"mode": "agent_lookup", "url": "TODO"},
+    "requires_otp": true,
+    "category_hint": "Roads > Potholes",
+    "escalate_to": "cpgrams"
+  },
+  "city_patna": {
+    "name": "Patna Municipal Corporation",
+    "verified": false,
+    "filing_url": "TODO",
+    "status": {"mode": "agent_lookup", "url": "TODO"},
+    "requires_otp": true,
+    "category_hint": "Roads > Potholes",
+    "escalate_to": "cpgrams"
+  }
+}
