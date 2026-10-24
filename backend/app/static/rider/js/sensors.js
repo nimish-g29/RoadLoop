@@ -11,12 +11,34 @@ export class GpsTrack {
   }
 
   push(fix) {
-    const prev = this.fixes[this.fixes.length - 1];
-    if (fix.speedKmh == null && prev && fix.t > prev.t) {
-      fix.speedKmh = (haversine(prev.lat, prev.lon, fix.lat, fix.lon) / (fix.t - prev.t)) * 3.6;
-    }
+    // Many phones report speed 0 (not "unknown") on Wi-Fi/cell fixes or between GPS updates.
+    // So also measure speed from movement over the last few seconds, and trust that when the
+    // phone gives no speed or claims 0 while we are clearly moving.
+    const moved = this.movedSpeed(fix);
+    if (fix.speedKmh == null) fix.speedKmh = moved;
+    else if (fix.speedKmh < 1 && moved != null && moved >= 5) fix.speedKmh = moved;
     this.fixes.push(fix);
     while (this.fixes.length && fix.t - this.fixes[0].t > this.keepS) this.fixes.shift();
+  }
+
+  /**
+   * km/h from the distance to a fix 3-15 s earlier (a short baseline would turn GPS jitter
+   * into fake speed). null if there is no such fix. Falls back to the previous fix if it is
+   * the only one, as before.
+   */
+  movedSpeed(fix, minS = 3, maxS = 15) {
+    let ref = null;
+    for (let i = this.fixes.length - 1; i >= 0; i--) {
+      const f = this.fixes[i], dt = fix.t - f.t;
+      if (dt > maxS) break;
+      if (dt >= minS) { ref = f; break; }
+    }
+    if (!ref) {
+      const prev = this.fixes[this.fixes.length - 1];
+      if (!prev || fix.t <= prev.t || this.fixes.length > 1) return null;
+      ref = prev;
+    }
+    return (haversine(ref.lat, ref.lon, fix.lat, fix.lon) / (fix.t - ref.t)) * 3.6;
   }
 
   get last() {

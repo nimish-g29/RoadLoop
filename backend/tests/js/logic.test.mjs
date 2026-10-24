@@ -111,3 +111,16 @@ test("hands-free: jolt trigger fires once per bump, not when slow or quiet", () 
   assert.equal(trig.check(buf, 5.12, 30), null);         // same pothole: cooldown
   assert.ok(new JoltTrigger().check(buf, 5.1, null));    // no GPS speed: still allowed
 });
+
+test("GPS speed: a phone reporting 0 while moving is overridden by measured movement", () => {
+  const g = new GpsTrack();
+  // ~36 km/h east (10 m/s), phone always says speed 0
+  for (let i = 0; i <= 6; i++) g.push({ t: i, lat: 28.5, lon: 77.0 + (i * 10) / 97800, speedKmh: 0, accuracy: 8 });
+  assert.ok(Math.abs(g.last.speedKmh - 36) < 3, `got ${g.last.speedKmh}`);
+});
+
+test("GPS speed: standing still with small jitter stays slow", () => {
+  const g = new GpsTrack();
+  for (let i = 0; i <= 6; i++) g.push({ t: i, lat: 28.5 + (i % 2) * 0.00002, lon: 77.0, speedKmh: 0, accuracy: 8 });
+  assert.ok(g.last.speedKmh < 5, `got ${g.last.speedKmh}`);
+});
