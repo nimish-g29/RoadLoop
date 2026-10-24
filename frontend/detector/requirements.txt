@@ -1,0 +1,6 @@
+numpy>=1.26
+opencv-python>=4.9
+onnxruntime>=1.18
+requests>=2.31
+# training only:
+# ultralytics>=8.3
