@@ -5,6 +5,27 @@ import { STATE_LABEL, actorLabel, describeEvent, fmtTime } from "../format.js";
 export default function Detail({ id, refreshKey, onClose }) {
   const [h, setH] = useState(null);
   const [err, setErr] = useState(null);
+  const [auths, setAuths] = useState([]);
+  const [pick, setPick] = useState("");
+  const [wholeArea, setWholeArea] = useState(false);
+  const [saved, setSaved] = useState(null);
+
+  useEffect(() => {
+    api.authorities().then(setAuths).catch(() => setAuths([]));
+  }, []);
+
+  async function saveAuthority() {
+    if (!pick) return;
+    try {
+      await api.setAuthority(id, pick, wholeArea);
+      setSaved("Saved. Nearby potholes on this road will reuse it.");
+      setH(await api.hotspot(id));
+    } catch (e) {
+      setSaved(`Failed: ${e.message}`);
+    }
+    setTimeout(() => setSaved(null), 5000);
+  }
+  const canChangeOwner = h && ["candidate", "confirmed", "filing_failed"].includes(h.state);
 
   useEffect(() => {
     let alive = true;
@@ -40,6 +61,26 @@ export default function Detail({ id, refreshKey, onClose }) {
           ))}
         </div>
       )}
+
+      <section>
+        <h3>Responsible authority</h3>
+        <p>
+          <b>{auths.find((a) => a.key === h.authority_key)?.name || h.authority_key || "Not decided yet"}</b>
+        </p>
+        {canChangeOwner && auths.length > 0 && (
+          <div className="owner-edit">
+            <select value={pick} onChange={(e) => setPick(e.target.value)} aria-label="Set responsible authority">
+              <option value="">Change authority…</option>
+              {auths.map((a) => (
+                <option key={a.key} value={a.key}>{a.name}{a.usable ? "" : " (portal not set up)"}</option>
+              ))}
+            </select>
+            <label className="toggle"><input type="checkbox" checked={wholeArea} onChange={(e) => setWholeArea(e.target.checked)} /> whole area</label>
+            <button className="ghost dark" disabled={!pick} onClick={saveAuthority}>Save</button>
+          </div>
+        )}
+        {saved && <p className="muted">{saved}</p>}
+      </section>
 
       <section>
         <h3>Complaints</h3>

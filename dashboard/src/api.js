@@ -1,8 +1,9 @@
 const BASE = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
+const ADMIN = import.meta.env.VITE_ADMIN_TOKEN || "";
 
 async function req(path, opts = {}) {
   const r = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(ADMIN ? { "X-Admin-Token": ADMIN } : {}) },
     ...opts,
   });
   if (!r.ok) {
@@ -29,4 +30,8 @@ export const api = {
   hotspot: (id) => req(`/v1/hotspots/${id}`),
   stats: () => req("/v1/stats"),
   runJob: (job) => req(`/v1/admin/run/${job}`, { method: "POST" }),
+  authorities: () => req("/v1/authorities"),
+  areas: () => req("/v1/areas"),
+  setAuthority: (id, authority_key, whole_area) =>
+    req(`/v1/hotspots/${id}/authority`, { method: "POST", body: JSON.stringify({ authority_key, whole_area }) }),
 };

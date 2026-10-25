@@ -121,10 +121,14 @@ def geocode_hotspot(self, hotspot_id: str):
         if not h:
             return
         lat, lon = h.lat, h.lon
-    try:
-        place = geocode.reverse(lat, lon, settings.geocoder_user_agent)
-    except Exception as e:  # network / rate limit: retry later, never block the pipeline
-        raise self.retry(countdown=10 * (self.request.retries + 1), exc=e)
+        place = wf.cached_place(s, lat, lon)   # area memory: this ~150 m cell was geocoded before
+        s.commit()
+    if place is None:
+        try:
+            place = geocode.reverse(lat, lon, settings.geocoder_user_agent)
+        except Exception as e:  # network / rate limit: retry later, never block the pipeline
+            raise self.retry(countdown=10 * (self.request.retries + 1), exc=e)
+        _run(wf.remember_place, lat, lon, place)
     _run(wf.apply_geocode, hotspot_id, place)
 
 

@@ -112,7 +112,8 @@ On macOS or Linux, use `cp` instead of `copy` and `/` instead of `\`.
 | API docs (Swagger) | http://localhost:8000/docs |
 | Rider app (laptop) | http://localhost:8000/app/ |
 | Fictional portal: new complaint | http://localhost:8100/portal/new |
-| Fictional portal: officer console | http://localhost:8100/portal/admin |
+| Fictional portal: officer desk (authority panel) | http://localhost:8100/portal/admin |
+| Database browser (Adminer) | http://localhost:8080 (PostgreSQL · server `db` · user, password, db `roadloop`) |
 
 The dashboard runs `npm install` on first start, so give it about a minute.
 
@@ -126,7 +127,7 @@ The tunnel URL changes on every start, so these steps repeat each time.
 2. **Start the tunnel** in its own PowerShell window and leave it open:
    ```powershell
    Stop-Process -Name cloudflared -ErrorAction SilentlyContinue
-   cloudflared tunnel --url http://localhost:8000
+   cloudflared tunnel --protocol http2 --url http://localhost:8000
    ```
    Copy the printed `https://<words>.trycloudflare.com` URL.
 3. **Update `.env`.** Change only this line, with no `/app/` and no trailing slash, and keep the comment below it on its own line:
@@ -184,7 +185,7 @@ Press Enter between acts while narrating, with the dashboard open alongside. `--
 
 1. Report the same pothole from **two different riders** (two phones or two registrations). The hotspot is confirmed.
 2. One of them taps **Approve filing** in My reports. A complaint ID appears on the dashboard.
-3. In the officer console, click **Closed** on that complaint, then **ticking monitors** (or **Check portals now** on the dashboard). The hotspot shows "Portal says closed: re-checking".
+3. In the officer desk, set that complaint to **Closed** (add a remark if you like) and click **Update**. RoadLoop re-reads the portal straight away: through the mock Monitor in mock mode, through a real TinyFish Fetch in live mode. The hotspot shows "Portal says closed: re-checking".
 4. **To show a false closure:** two riders report the pothole again → reopened and escalated.
 5. **To show a verified repair:** send two clean passes from two **different** riders in Swagger (`POST /v1/hotspots/{hotspot_id}/passes`):
    ```json
@@ -198,14 +199,35 @@ The fictional portal keeps complaints in memory, so restarting the `mock` contai
 
 ## Going live with TinyFish
 
-1. Get a key at agent.tinyfish.ai/api-keys. In `.env`, set `TINYFISH_MODE=live` and `TINYFISH_API_KEY`.
-2. TinyFish must reach your webhooks over **https**, so `PUBLIC_BASE_URL` must be the tunnel URL. Without https, RoadLoop polls instead and skips Monitors.
-3. For a CAPTCHA-free live demo, also tunnel the fictional portal (port 8100) and replace `{MOCK}` for `demo` in `backend/app/tinyfish/portals.json` with that public URL. The real agent then fills a real form you control.
-4. For real portals, walk each one with TinyFish first, fill its entry in `portals.json` (filing URL, status mode, OTP), and set `"verified": true`.
+The fictional portal's public pages are also served through the API at `/portal/...`, so **one tunnel** is enough: the real TinyFish cloud browser files on `https://<tunnel>/portal/new`, reads `https://<tunnel>/portal/status/<id>`, and calls the webhooks on the same URL. The officer desk is never exposed.
 
-Never send test or fake complaints to a real government portal.
+1. Get a key at agent.tinyfish.ai/api-keys. In `.env` set:
+   ```
+   TINYFISH_MODE=live
+   TINYFISH_API_KEY=<your key>
+   PUBLIC_BASE_URL=https://<tunnel>.trycloudflare.com
+   WEBHOOK_TOKEN=<any long random string>
+   ```
+2. `docker compose up -d --force-recreate api worker beat mock`
+3. Check it: open http://localhost:8000/health (`tinyfish_mode` should be `live`, `portal_base` your tunnel URL), then http://localhost:8000/v1/admin/tinyfish-check (one cheap TinyFish Search; `ok: true` means the key works). The dashboard header shows **TinyFish LIVE**.
+4. Approve a filing from the phone. Watch `docker compose logs -f worker`: the agent run takes about one to three minutes, then the complaint ID appears on the dashboard and in the officer desk.
 
----
+Status tracking in live mode: a TinyFish Monitor watches each status page on `MONITOR_CRON`. For the demo you don't wait for it: updating a ticket in the officer desk tells RoadLoop to re-read the page with TinyFish Fetch immediately (the dashboard's **Check portals now** does the same).
+
+If the tunnel URL changes, monitors created on the old URL stop working; open complaints are still checked by Fetch every 30 minutes and by **Check portals now**.
+
+For real government portals, walk each one with TinyFish first, fill its entry in `portals.json` (filing URL, status mode, OTP) and set `"verified": true`. Never send test complaints to a real government portal.
+
+## Area memory: TinyFish researches a road once
+
+Finding the responsible authority with TinyFish Search and Agent costs time and credits, so RoadLoop remembers the answer.
+
+1. When a hotspot is confirmed, RoadLoop looks in **area memory** first: same road (highway ref or road name) in this ~1 km area or the neighbouring ones, or an area-wide rule an engineer set. A hit sets the authority instantly and the agent only files.
+2. No hit: the free rule pass (NH → NHAI, SH → state PWD, city road → municipal corporation).
+3. Only if the rules are unsure does TinyFish research it, and the result is stored for every later pothole on that road.
+4. An engineer can correct the authority on the dashboard (for one road or the whole area). Engineer > TinyFish > rules: a weaker source never overwrites a stronger one.
+
+Reverse geocoding is cached the same way (~150 m cells), so Nominatim is called once per stretch of road. The authority lookup also waits for geocoding instead of firing TinyFish on a hotspot with no road name. The dashboard shows how many TinyFish lookups area memory saved, and `GET /v1/areas` lists everything learned.
 
 ## Configuration
 
@@ -239,7 +261,7 @@ Tuning knobs, read by `backend/app/config.py`: `MIN_RIDERS=2`, `MIN_CONFIDENCE=0
 | `backend/app/static/rider/` | Rider PWA: drive mode, hands-free jolt capture, photo reports, approvals, offline queue |
 | `dashboard/` | React + MapLibre engineer queue: ranked list, map, SLA clocks, complaint IDs, audit timeline |
 | `detector/` | YOLO ONNX inference, IMU/GPS fusion, privacy redaction, dashcam CLI, training and export |
-| `mock_tinyfish/` | Same REST shapes as TinyFish, plus the fictional portal and officer console |
+| `mock_tinyfish/` | Fictional municipal grievance portal (public pages + officer desk, persisted to a volume) and a TinyFish stand-in for mock mode |
 | `scripts/demo.py` | The scripted judge demo |
 
 ---
@@ -272,23 +294,22 @@ python scripts\demo.py --no-pause                    # end-to-end against the ru
 
 | Part | State |
 |---|---|
-| Full stack in Docker, scripted demo, dashboard | Working on a team machine (mock TinyFish) |
+| Full stack in Docker, scripted demo, dashboard (mock TinyFish) | Working on a team machine |
 | Rider app on a real phone through a tunnel | Working: registration, reports, approval, filing, tracking |
-| Hands-free jolt capture | JS unit tests pass (11 total); thresholds not yet tuned on real rides |
-| Live TinyFish | **Not yet verified.** Runs against the mock service |
-| Pothole model weights | **Not included.** Train with `detector/train.py` |
+| Hands-free jolt capture | Adaptive threshold, speed measured from GPS movement; JS tests pass (14). Not yet tuned on many real rides |
+| Live TinyFish | Client matches the Agent API docs; portal reachable through the tunnel. Verify with `/v1/admin/tinyfish-check` and one filing |
+| Area memory and geocode cache | Service-level tests added (`test_area_memory_*`, `test_geocode_cache`) |
+| Pothole model weights | **Not included.** Without them Drive mode detects by jolt; train with `detector/train.py` |
 | Real portal entries in `portals.json` | Unverified |
 | iPhone Safari | Untested |
 
 **Known limitations**
 
-- No database migrations yet; tables come from SQLAlchemy `create_all`.
-- `/v1/admin/run/{job}` has no authentication.
-- Two potholes within 12 m can merge into one hotspot.
-- A jolt alone can't tell a pothole from a speed breaker; the photo and the two-rider rule filter this until the model is trained.
-- Without the model, clean verification passes can't come from the phone; use the API as in [Running the demo](#running-the-demo).
-
----
+- No database migrations; new tables are created on start, but changing existing columns needs a reset.
+- Jolt alone can't tell a pothole from a speed breaker; the photo, the two-rider rule and engineer review filter this until the model is trained.
+- Without the model, a clean re-check comes from riding through the spot at speed with no bump. That is weaker evidence than the model seeing a clear road, so two different riders are required.
+- Two potholes within 12 m merge into one hotspot.
+- Admin endpoints are open unless `ADMIN_TOKEN` is set.
 
 ## Troubleshooting
 

@@ -48,10 +48,38 @@ def _auth(request: Request) -> JSONResponse | None:
 
 
 # ------------------------------------------------------------- fake portal
+# Complaints persist to a JSON file (a docker volume) so the officer desk survives restarts.
+DATA_FILE = os.environ.get("PORTAL_DATA", "/data/portal.json")
+STATUSES = ("Pending", "Under Process", "Closed", "Rejected")
+
+
+def _save() -> None:
+    try:
+        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+        tmp = DATA_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(COMPLAINTS, f)
+        os.replace(tmp, DATA_FILE)
+    except OSError:
+        pass  # read-only or missing volume: keep working in memory
+
+
+def _load() -> None:
+    global _seq
+    try:
+        with open(DATA_FILE, encoding="utf-8") as f:
+            COMPLAINTS.update(json.load(f))
+    except (OSError, ValueError):
+        return
+    nums = [int(k.rsplit("-", 1)[1]) for k in COMPLAINTS if k.rsplit("-", 1)[-1].isdigit()]
+    _seq = itertools.count(max(nums, default=1000) + 1)
+
+
 def new_complaint(fields: dict, kind: str = "grievance") -> str:
     cid = f"DMG-{datetime.now().year}-{next(_seq):06d}"
     COMPLAINTS[cid] = {"id": cid, "kind": kind, "status": "Pending", "created_at": now(), "remarks": "",
-                       "fields": fields, "history": [("Pending", now())]}
+                       "fields": fields, "history": [["Pending", now(), "Registered online"]]}
+    _save()
     return cid
 
 
@@ -63,73 +91,177 @@ def portal_status_text(cid: str) -> str:
             f"Status: {c['status']}\nRemarks: {c['remarks'] or '-'}\nLast updated: {c['history'][-1][1]}\n")
 
 
-PAGE = """<!doctype html><html><head><meta charset=utf-8><title>{title}</title>
-<style>body{{font-family:system-ui;max-width:720px;margin:2rem auto;padding:0 1rem}}
-label{{display:block;margin:.6rem 0 .2rem}}input,textarea,select{{width:100%;padding:.5rem}}
-.banner{{background:#fff3cd;padding:.5rem;border:1px solid #e0c060}}button{{margin-top:1rem;padding:.6rem 1.2rem}}
-table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:.4rem}}</style></head>
-<body><p class=banner>FICTIONAL DEMO PORTAL for RoadLoop testing. Not a government website.</p>{body}</body></html>"""
+CSS = """
+:root{--ink:#1d2430;--muted:#5b6574;--line:#d9dee5;--bg:#f4f6f9;--brand:#0b4f8a;--warn:#fff4d6;--warnl:#e3b341}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,Segoe UI,Arial;color:var(--ink);background:var(--bg)}
+.demo{background:var(--warn);border-bottom:1px solid var(--warnl);padding:6px 16px;font-size:13px;text-align:center}
+header.gov{background:var(--brand);color:#fff;padding:14px 24px;display:flex;align-items:center;gap:14px}
+header.gov .seal{width:40px;height:40px;border-radius:50%;border:3px solid #fff;display:grid;place-items:center;font-weight:700}
+header.gov h1{font-size:19px;margin:0}header.gov p{margin:0;font-size:13px;opacity:.85}
+nav{background:#083a66;padding:0 24px}nav a{color:#dce8f5;text-decoration:none;display:inline-block;padding:9px 12px;font-size:14px}
+nav a.on,nav a:hover{background:#0b4f8a;color:#fff}
+main{max-width:1100px;margin:22px auto;padding:0 16px}.card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:20px;margin-bottom:16px}
+h2{margin:0 0 12px;font-size:20px}label{display:block;font-weight:600;margin:12px 0 4px;font-size:14px}
+input,select,textarea{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:6px;font:inherit;background:#fff}
+button,.btn{background:var(--brand);color:#fff;border:0;border-radius:6px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
+button.light{background:#e8eef5;color:var(--brand)}.muted{color:var(--muted)}.mono{font-family:ui-monospace,Consolas,monospace}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}@media(max-width:720px){.grid2{grid-template-columns:1fr}}
+.badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700}
+.b-Pending{background:#eef1f5;color:#3d4757}.b-Under{background:#fff1d6;color:#8a5a00}.b-Closed{background:#dff3e4;color:#1d6b35}.b-Rejected{background:#fde2e1;color:#9b1c1c}
+.kpis{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}.kpi{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 16px;min-width:130px}
+.kpi b{display:block;font-size:24px}.kpi span{font-size:13px;color:var(--muted)}
+.tabs a{display:inline-block;padding:6px 12px;border-radius:99px;border:1px solid var(--line);margin-right:6px;text-decoration:none;color:var(--ink);background:#fff;font-size:13px}
+.tabs a.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.ticket{display:grid;grid-template-columns:140px 1fr 280px;gap:16px;align-items:start}@media(max-width:900px){.ticket{grid-template-columns:1fr}}
+.ticket img{width:140px;height:105px;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#eee}
+.noimg{width:140px;height:105px;border-radius:8px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--muted);font-size:12px}
+.hist{font-size:12px;color:var(--muted);margin:8px 0 0;padding-left:16px}.desc{white-space:pre-wrap;font-size:14px;margin:6px 0}
+.ok{background:#dff3e4;border:1px solid #9fd3ae;padding:14px;border-radius:8px}.big{font-size:26px;font-weight:800;letter-spacing:.5px}
+pre.status{background:#f7f9fb;border:1px solid var(--line);padding:14px;border-radius:8px;white-space:pre-wrap}
+"""
+
+
+def page(title: str, body: str, active: str = "", officer: bool = False) -> HTMLResponse:
+    links = ([("Officer desk", "/portal/admin", "admin")] if officer else
+             [("Register grievance", "/portal/new", "new"), ("Track status", "/portal/status", "status")])
+    nav = "".join(f"<a href='{u}' class='{'on' if k == active else ''}'>{t}</a>" for t, u, k in links)
+    return HTMLResponse(f"""<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>{CSS}</style></head>
+<body><div class=demo>FICTIONAL DEMO PORTAL built for RoadLoop testing. Not a government website.</div>
+<header class=gov><div class=seal>DM</div><div><h1>Demo Municipal Corporation · Public Grievance Redressal</h1>
+<p>{'Officer desk: roads and infrastructure' if officer else 'Roads · Streetlights · Sanitation'}</p></div></header>
+<nav>{nav}</nav><main>{body}</main></body></html>""")
+
+
+def _badge(status: str) -> str:
+    return f"<span class='badge b-{status.split()[0]}'>{html.escape(status)}</span>"
 
 
 async def portal_new(request: Request):
+    escalation = request.url.path.endswith("/escalate")
     if request.method == "GET":
-        body = """<h1>Register a New Grievance</h1>
+        title = "Escalate an unresolved grievance" if escalation else "Register a new grievance"
+        subj = ("<label for=subject>Subject</label><input id=subject name=subject required>" if escalation else "")
+        body = f"""<div class=card><h2>{title}</h2>
 <form method=post enctype=multipart/form-data>
-<label>Category</label><select name=category><option>Roads &gt; Potholes</option><option>Streetlights</option><option>Garbage</option></select>
-<label>Your name</label><input name=name required>
-<label>Mobile number</label><input name=mobile required>
-<label>Location / address</label><input name=address required>
-<label>Landmark or GPS</label><input name=landmark>
-<label>Description</label><textarea name=description rows=4 required></textarea>
-<label>Photo (optional)</label><input type=file name=photo accept=image/*>
-<button type=submit>Submit grievance</button></form>"""
-        return HTMLResponse(PAGE.format(title="New Grievance", body=body))
+<label for=category>Category</label><select id=category name=category>
+<option>Roads &gt; Potholes</option><option>Escalation of unresolved grievance</option><option>Streetlights</option><option>Garbage</option></select>
+{subj}<div class=grid2><div><label for=name>Your name</label><input id=name name=name required></div>
+<div><label for=mobile>Mobile number</label><input id=mobile name=mobile required inputmode=numeric></div></div>
+<label for=address>Location / address</label><input id=address name=address required>
+<label for=landmark>Landmark or GPS</label><input id=landmark name=landmark>
+<label for=description>Description</label><textarea id=description name=description rows=5 required></textarea>
+<label for=photo>Photo (optional)</label><input id=photo type=file name=photo accept=image/*>
+<p><button type=submit>Submit grievance</button></p></form></div>"""
+        return page(title, body, "new")
     form = await request.form()
     fields = {k: (v if isinstance(v, str) else f"<file {getattr(v, 'filename', '')}>") for k, v in form.items()}
-    cid = new_complaint(fields)
-    return HTMLResponse(PAGE.format(title="Submitted", body=(
-        f"<h1>Grievance registered</h1><p>Your complaint number is <b id=complaint-id>{cid}</b>. "
-        f"Track it at <a href='/portal/status/{cid}'>/portal/status/{cid}</a>.</p>")))
+    cid = new_complaint(fields, kind="escalation" if escalation else "grievance")
+    what = "Escalation" if escalation else "Grievance"
+    return page("Submitted", f"""<div class=card><div class=ok><h2>{what} registered successfully</h2>
+<p>Complaint No: <span class=big id=complaint-id>{cid}</span></p>
+<p>Keep this number to track your complaint. <a href='/portal/status/{cid}'>Track {cid}</a></p></div></div>""", "new")
 
 
-async def portal_escalate(request: Request):
-    if request.method == "GET":
-        return await portal_new(request)
-    form = await request.form()
-    cid = new_complaint({k: str(v) for k, v in form.items()}, kind="escalation")
-    return HTMLResponse(PAGE.format(title="Escalated", body=f"<h1>Escalation registered</h1><p>Reference <b>{cid}</b>.</p>"))
+portal_escalate = portal_new
+
+
+async def portal_status_lookup(request: Request):
+    cid = (request.query_params.get("id") or "").strip()
+    if cid:
+        return RedirectResponse(f"/portal/status/{cid}", status_code=303)
+    return page("Track status", """<div class=card><h2>Track your complaint</h2><form method=get>
+<label for=id>Complaint number</label><input id=id name=id placeholder="DMG-2026-001001" required>
+<p><button type=submit>Check status</button></p></form></div>""", "status")
 
 
 async def portal_status(request: Request):
     cid = request.path_params["cid"]
-    text = portal_status_text(cid)
-    return HTMLResponse(PAGE.format(title=f"Status {cid}", body="<pre>" + html.escape(text) + "</pre>"))
+    c = COMPLAINTS.get(cid)
+    hist = ""
+    if c:
+        hist = "<ol class=hist>" + "".join(
+            f"<li>{html.escape(h[0])} · {html.escape(h[1][:16].replace('T', ' '))} UTC"
+            f"{' · ' + html.escape(h[2]) if len(h) > 2 and h[2] else ''}</li>" for h in c["history"]) + "</ol>"
+    head = f"<h2>Complaint {html.escape(cid)} {_badge(c['status']) if c else ''}</h2>"
+    return page(f"Status {cid}", f"<div class=card>{head}<pre class=status>{html.escape(portal_status_text(cid))}</pre>"
+                                 f"{hist}</div>", "status")
+
+
+_URL = re.compile(r"https?://\S+?\.(?:jpe?g|png|webp)", re.I)
+_GPS = re.compile(r"(-?\d{1,2}\.\d{3,})\s*,\s*(-?\d{1,3}\.\d{3,})")
+
+
+def _ticket(c: dict) -> str:
+    f = c.get("fields", {})
+    text = " ".join(str(v) for v in f.values())
+    photo = _URL.search(text)
+    gps = _GPS.search(f.get("landmark", "") + " " + text)
+    img = (f"<a href='{html.escape(photo.group(0))}' target=_blank><img src='{html.escape(photo.group(0))}' alt='Complaint photo'></a>"
+           if photo else "<div class=noimg>No photo</div>")
+    maps = (f" · <a href='https://maps.google.com/?q={gps.group(1)},{gps.group(2)}' target=_blank>map</a>" if gps else "")
+    mob = f.get("mobile", "")
+    mob = (mob[:2] + "•" * max(0, len(mob) - 4) + mob[-2:]) if len(mob) > 4 else mob
+    hist = "".join(f"<li>{html.escape(h[0])} · {html.escape(h[1][11:16])} UTC"
+                   f"{' · ' + html.escape(h[2]) if len(h) > 2 and h[2] else ''}</li>" for h in c["history"])
+    opts = "".join(f"<option {'selected' if s == c['status'] else ''}>{s}</option>" for s in STATUSES)
+    kind = "Escalation" if c.get("kind") == "escalation" else "Grievance"
+    return f"""<div class='card ticket' id='{c['id']}'>{img}
+<div><div><b class=mono>{c['id']}</b> {_badge(c['status'])} <span class=muted>· {kind} · {html.escape(c['created_at'][:16].replace('T', ' '))} UTC</span></div>
+<div><b>{html.escape(f.get('subject') or f.get('category') or 'Roads > Potholes')}</b></div>
+<div class=muted>{html.escape(f.get('address', ''))}{maps}</div>
+<div class=desc>{html.escape(f.get('description', '')[:600])}</div>
+<div class=muted>Citizen: {html.escape(f.get('name', '-'))} · {html.escape(mob)}</div><ol class=hist>{hist}</ol></div>
+<form method=post action='/portal/admin/{c['id']}'><label>Update status</label><select name=status>{opts}</select>
+<label>Officer remarks</label><input name=remarks placeholder="e.g. Patch work completed">
+<p><button type=submit>Update</button></p></form></div>"""
 
 
 async def portal_admin(request: Request):
-    rows = "".join(
-        f"<tr><td>{c['id']}</td><td>{html.escape(c['fields'].get('address', ''))}</td><td>{c['status']}</td><td>"
-        + "".join(f"<form method=post action='/portal/admin/{c['id']}' style='display:inline'>"
-                  f"<input type=hidden name=status value='{s}'><button>{s}</button></form> "
-                  for s in ("Under Process", "Closed", "Pending"))
-        + "</td></tr>" for c in COMPLAINTS.values())
-    body = (f"<h1>Officer console (demo)</h1><table><tr><th>ID</th><th>Address</th><th>Status</th><th>Set</th></tr>"
-            f"{rows}</table><p>Closing a ticket here then <a href='/mock/monitors/tick'>ticking monitors</a> "
-            f"simulates a scheduled TinyFish Monitor run.</p>")
-    return HTMLResponse(PAGE.format(title="Officer console", body=body))
+    want = request.query_params.get("status", "")
+    rows = sorted(COMPLAINTS.values(), key=lambda c: c["created_at"], reverse=True)
+    counts = {s: sum(1 for c in rows if c["status"] == s) for s in STATUSES}
+    shown = [c for c in rows if not want or c["status"] == want]
+    kpis = "".join(f"<div class=kpi><b>{counts[s]}</b><span>{s}</span></div>" for s in STATUSES)
+    tabs = "<div class=tabs>" + "".join(
+        f"<a href='/portal/admin{('?status=' + s) if s else ''}' class='{'on' if want == s else ''}'>{s or 'All'}</a>"
+        for s in ("",) + STATUSES) + "</div>"
+    tickets = "".join(_ticket(c) for c in shown) or "<div class=card muted>No complaints yet. They appear here as soon as RoadLoop files one.</div>"
+    body = (f"<div class=kpis>{kpis}</div><div class=card style='display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap'>"
+            f"{tabs}<span class=muted>Closing a ticket here is what RoadLoop independently re-checks on the road.</span></div>{tickets}"
+            "<script>setInterval(()=>{if(!document.activeElement||!['INPUT','SELECT'].includes(document.activeElement.tagName))location.reload()},10000)</script>")
+    return page("Officer desk", body, "admin", officer=True)
+
+
+async def _notify_roadloop():
+    """Live mode: ask RoadLoop to re-read portal statuses now (via TinyFish Fetch) instead of waiting for
+    the scheduled Monitor. Mock mode: simulate the Monitor firing."""
+    if os.environ.get("TINYFISH_MODE", "mock") != "live":
+        await _tick_monitors()
+        return
+    api = os.environ.get("ROADLOOP_API", "http://api:8000")
+    headers = {"X-Admin-Token": os.environ["ADMIN_TOKEN"]} if os.environ.get("ADMIN_TOKEN") else {}
+    try:
+        await asyncio.to_thread(requests.post, f"{api}/v1/admin/run/check_statuses", headers=headers, timeout=60)
+    except requests.RequestException:
+        pass
 
 
 async def portal_admin_set(request: Request):
     cid = request.path_params["cid"]
     form = await request.form()
     status = str(form.get("status", "Closed"))
+    if status not in STATUSES:
+        status = "Closed"
     if cid in COMPLAINTS:
-        COMPLAINTS[cid]["status"] = status
-        COMPLAINTS[cid]["remarks"] = "Work completed" if status == "Closed" else ""
-        COMPLAINTS[cid]["history"].append((status, now()))
+        c = COMPLAINTS[cid]
+        remark = str(form.get("remarks", "")).strip()[:200] or ("Work completed" if status == "Closed" else "")
+        c["status"], c["remarks"] = status, remark
+        c["history"].append([status, now(), remark])
+        _save()
         if os.environ.get("MOCK_AUTO_TICK", "1") == "1":
-            asyncio.create_task(_tick_monitors())
-    return RedirectResponse("/portal/admin", status_code=303)
+            asyncio.create_task(_notify_roadloop())
+    return RedirectResponse(f"/portal/admin#{cid}", status_code=303)
 
 
 # ------------------------------------------------------------ agent runs
@@ -355,6 +487,8 @@ async def health(request: Request):
     return JSONResponse({"ok": True, "runs": len(RUNS), "monitors": len(MONITORS), "complaints": len(COMPLAINTS)})
 
 
+_load()
+
 app = Starlette(routes=[
     Route("/health", health),
     Route("/v1/automation/run", run_sync, methods=["POST"]),
@@ -371,6 +505,7 @@ app = Starlette(routes=[
     Route("/portal", lambda r: RedirectResponse("/portal/new")),
     Route("/portal/new", portal_new, methods=["GET", "POST"]),
     Route("/portal/escalate", portal_escalate, methods=["GET", "POST"]),
+    Route("/portal/status", portal_status_lookup),
     Route("/portal/status/{cid}", portal_status),
     Route("/portal/admin", portal_admin),
     Route("/portal/admin/{cid}", portal_admin_set, methods=["POST"]),

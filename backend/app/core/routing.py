@@ -34,6 +34,46 @@ def road_class_from_ref(road_ref: str | None, road_name: str | None) -> str:
     return "local"
 
 
+_REF = re.compile(r"\b(NH|SH|MDR|ODR)\s*[-]?\s*(\d+[A-Z]?)\b", re.I)
+
+
+def road_key(road_ref: str | None, road_name: str | None) -> str | None:
+    """Stable key for "this road" in area memory: a highway ref if there is one, else the name slug.
+    "NH-44", "nh 44" -> "nh44";  "Shri Maa Anandamayee Marg" -> "shri_maa_anandamayee_marg"."""
+    text = f"{road_ref or ''} {road_name or ''}"
+    m = _REF.search(text)
+    if m:
+        return f"{m.group(1).lower()}{m.group(2).lower()}"
+    if road_name:
+        slug = re.sub(r"[^a-z0-9]+", "_", road_name.lower()).strip("_")
+        return slug[:120] or None
+    return None
+
+
+SOURCE_RANK = {"rules": 0, "tinyfish": 1, "engineer": 2}
+
+
+def pick_area_memory(rows: list, own_cell: str, key: str | None):
+    """Best remembered authority for a pothole, or None.
+    rows: objects with cell, road_key, source, confidence. A same-road row from this cell or a neighbour
+    wins; an any-road row only counts in the pothole's own cell. Engineer > TinyFish > rules, then confidence.
+    Rule-only memories below 0.7 confidence are not trusted (they would have asked TinyFish anyway)."""
+    best, best_rank = None, None
+    for r in rows:
+        if key and r.road_key == key:
+            match = 2
+        elif r.road_key is None and r.cell == own_cell:
+            match = 1
+        else:
+            continue
+        if r.source == "rules" and (r.confidence or 0) < 0.7:
+            continue
+        rank = (match, SOURCE_RANK.get(r.source, 0), r.confidence or 0, r.cell == own_cell)
+        if best_rank is None or rank > best_rank:
+            best, best_rank = r, rank
+    return best
+
+
 def resolve_authority(road_ref: str | None, road_name: str | None, city_key: str | None,
                       state_key: str | None) -> Resolution:
     text = f"{road_ref or ''} {road_name or ''}".strip()

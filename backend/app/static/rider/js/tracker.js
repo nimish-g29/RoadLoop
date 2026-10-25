@@ -78,25 +78,46 @@ export function bumpLookback(speedKmh, lookaheadM = 8) {
 }
 
 /**
- * Fires once per hard bump. Ignores bumps while stopped or crawling (phone being handled,
- * getting on the bike) and repeats within cooldownS (one pothole shakes for a while).
- * speedKmh = null means the phone gives no GPS speed: allowed, the crowd check filters noise.
+ * Fires once per hard bump. The bar adapts to the road: on a rough road the bike shakes all the
+ * time, so a pothole must stand out from the last few seconds of vibration (noiseK x the typical
+ * shake), never below minG. Ignores bumps while stopped or crawling (handling the phone, getting
+ * on the bike) and repeats within cooldownS (one pothole shakes for a while).
+ * speedKmh = null means the phone gives no speed: allowed, the crowd check filters noise.
  */
 export class JoltTrigger {
-  constructor({ thresholdG = 0.5, minSpeedKmh = 10, cooldownS = 4, windowS = 0.3 } = {}) {
-    Object.assign(this, { thresholdG, minSpeedKmh, cooldownS, windowS });
+  constructor({ minG, thresholdG, noiseK = 3.5, minSpeedKmh = 8, cooldownS = 4, windowS = 0.3, noiseS = 5 } = {}) {
+    this.minG = minG ?? thresholdG ?? 0.4;
+    Object.assign(this, { noiseK, minSpeedKmh, cooldownS, windowS, noiseS });
     this.lastFire = -Infinity;
+    this.threshold = this.minG;
   }
 
-  /** buf: JoltBuffer. Returns {t, g} when a bump fires, else null. */
+  /** Typical shake over the last noiseS seconds (robust: median absolute deviation, in g). */
+  noise(buf, t) {
+    const xs = [];
+    for (let i = 0; i < buf.t.length; i++) {
+      if (buf.t[i] >= t - this.noiseS && buf.t[i] < t - this.windowS) xs.push(buf.g[i]);
+    }
+    if (xs.length < 10) return 0;
+    const med = median(xs);
+    return 1.4826 * median(xs.map((x) => Math.abs(x - med)));
+  }
+
+  /** buf: JoltBuffer. Returns {t, g, threshold} when a bump fires, else null. */
   check(buf, t, speedKmh) {
+    this.threshold = Math.max(this.minG, this.noiseK * this.noise(buf, t));
     if (t - this.lastFire < this.cooldownS) return null;
     if (speedKmh != null && speedKmh < this.minSpeedKmh) return null;
     const g = buf.peak(t - this.windowS, t);
-    if (g == null || g < this.thresholdG) return null;
+    if (g == null || g < this.threshold) return null;
     this.lastFire = t;
-    return { t, g };
+    return { t, g, threshold: this.threshold };
   }
+}
+
+function median(xs) {
+  const a = [...xs].sort((p, q) => p - q), m = a.length >> 1;
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 }
 
 /** When does the wheel reach a pothole seen biggest at bestT? ~lookaheadM metres later. */

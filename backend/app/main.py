@@ -4,7 +4,10 @@ Rider app:   POST /v1/riders, POST /v1/detections, POST /v1/hotspots/{id}/passes
              POST /v1/hotspots/{id}/approve
 Dashboard:   GET /v1/hotspots (ranked queue), GET /v1/hotspots/{id}, GET /v1/stats
 TinyFish:    POST /webhooks/{token}/agent, POST /webhooks/{token}/monitor
-Demo:        POST /v1/admin/run/{job}
+Engineers:   GET /v1/areas (area memory), POST /v1/hotspots/{id}/authority, GET /v1/authorities
+Demo/admin:  POST /v1/admin/run/{job}, GET /v1/admin/tinyfish-check
+Portal:      /portal/new|escalate|status/* proxied to the fictional demo portal, so the REAL TinyFish
+             browser reaches it through the same https tunnel as the API (officer console stays local)
 """
 from __future__ import annotations
 
@@ -14,7 +17,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -27,14 +32,20 @@ from .config import settings
 from .core import geo
 from .core.lifecycle import State
 from .db import get_session, init_db, is_postgres
-from .models import AuditEvent, Complaint, Detection, Hotspot, Rider
+from .models import AreaAuthority, AreaPlace, AuditEvent, Complaint, Detection, Hotspot, Rider
 from .services import workflow as wf
 
 MAX_PHOTO_BYTES = 4 * 1024 * 1024
 media_root = Path(settings.media_dir)
 media_root.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="RoadLoop API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app):
+    _startup()
+    yield
+
+
+app = FastAPI(title="RoadLoop API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/media", StaticFiles(directory=str(media_root)), name="media")
 
@@ -49,7 +60,6 @@ def _root():
     return RedirectResponse("/app/")
 
 
-@app.on_event("startup")
 def _startup():
     import logging
     init_db()
@@ -81,8 +91,17 @@ def hotspot_out(s: Session, h: Hotspot) -> schemas.HotspotOut:
 
 # -------------------------------------------------------------------- rider
 @app.get("/health")
-def health():
-    return {"ok": True, "tinyfish_mode": settings.tinyfish_mode, "webhooks": settings.webhooks_enabled}
+def health(s: Session = Depends(get_session)):
+    from sqlalchemy import text
+    s.execute(text("SELECT 1"))
+    return {"ok": True, "tinyfish_mode": settings.tinyfish_mode, "webhooks": settings.webhooks_enabled,
+            "portal_base": settings.portal_base, "public_base_url": settings.public_base_url}
+
+
+def require_admin(x_admin_token: str | None = Header(default=None)):
+    """Admin actions need X-Admin-Token when ADMIN_TOKEN is set (it is open in local demos)."""
+    if settings.admin_token and x_admin_token != settings.admin_token:
+        raise HTTPException(401, "admin token required")
 
 
 @app.post("/v1/riders", response_model=schemas.RiderOut, status_code=201)
@@ -175,6 +194,8 @@ def app_config():
         "model_meta": json.loads(meta.read_text()) if meta.exists() else {"imgsz": 640, "conf": 0.35},
         "verify_radius_m": settings.verify_radius_m,
         "min_riders": settings.min_riders,
+        "bump": {"minG": settings.bump_min_g, "noiseK": settings.bump_noise_k,
+                 "minSpeedKmh": settings.bump_min_speed_kmh},
     }
 
 
@@ -255,8 +276,12 @@ def stats(s: Session = Depends(get_session)):
     repair_days = {k: round(sorted(v)[len(v) // 2], 1) for k, v in by_authority.items()}
     fake_closures = s.scalar(select(func.count()).select_from(AuditEvent)
                              .where(AuditEvent.action.like("state:awaiting_verification->reopened"))) or 0
+    areas = s.scalar(select(func.count()).select_from(AreaAuthority)) or 0
+    reuses = s.scalar(select(func.coalesce(func.sum(AreaAuthority.hits), 0))) or 0
+    geo_reuses = s.scalar(select(func.coalesce(func.sum(AreaPlace.hits), 0))) or 0
     return {"by_state": by_state, "median_days_to_verified_fix": repair_days,
-            "closures_caught_unfixed": fake_closures,
+            "closures_caught_unfixed": fake_closures, "tinyfish_mode": settings.tinyfish_mode,
+            "area_memory": {"areas": areas, "authority_reuses": int(reuses), "geocode_reuses": int(geo_reuses)},
             "open_high": s.scalar(select(func.count()).select_from(Hotspot).where(
                 Hotspot.severity == "high", Hotspot.state != State.VERIFIED_FIXED.value)) or 0}
 
@@ -290,7 +315,7 @@ async def monitor_webhook(token: str, request: Request, s: Session = Depends(get
 
 
 # --------------------------------------------------------------------- demo
-@app.post("/v1/admin/run/{job}")
+@app.post("/v1/admin/run/{job}", dependencies=[Depends(require_admin)])
 def run_job_now(job: str, s: Session = Depends(get_session)):
     """Dashboard buttons. Runs now and reports what happened (the scheduled versions run in Celery beat).
     check_statuses: re-read every open complaint's portal status now.
@@ -327,3 +352,81 @@ def run_job_now(job: str, s: Session = Depends(get_session)):
         s.commit()
         return {"job": job, "message": "Priorities refreshed."}
     raise HTTPException(404, "unknown job")
+
+
+# ---------------------------------------------------------- area memory
+@app.get("/v1/authorities")
+def authorities():
+    """Authorities an engineer can assign (portal registry keys)."""
+    return [{"key": k, "name": p.name, "verified": p.verified, "usable": p.usable}
+            for k, p in wf.portals().items()]
+
+
+@app.get("/v1/areas")
+def areas(limit: int = Query(200, le=1000), s: Session = Depends(get_session)):
+    """What RoadLoop has learned about who maintains which road, and how often it reused that."""
+    rows = s.scalars(select(AreaAuthority).order_by(AreaAuthority.hits.desc(), AreaAuthority.updated_at.desc())
+                     .limit(limit))
+    out = []
+    for r in rows:
+        lat, lon = geo.decode(r.cell)
+        out.append({"id": r.id, "cell": r.cell, "lat": lat, "lon": lon, "road": r.road_name, "road_key": r.road_key,
+                    "city": r.city_key, "authority": r.authority_key, "confidence": r.confidence,
+                    "source": r.source, "hits": r.hits, "evidence_url": r.evidence_url,
+                    "updated_at": r.updated_at})
+    return out
+
+
+@app.post("/v1/hotspots/{hotspot_id}/authority", dependencies=[Depends(require_admin)])
+def set_hotspot_authority(hotspot_id: str, body: dict, s: Session = Depends(get_session)):
+    """Engineer sets the right authority; area memory reuses it for later potholes on this road
+    (or this whole area with whole_area=true)."""
+    try:
+        h = wf.set_authority(s, hotspot_id, str(body.get("authority_key", "")), bool(body.get("whole_area")))
+    except wf.WorkflowError as e:
+        _bad(e)
+    s.commit()
+    return {"hotspot_id": h.id, "authority_key": h.authority_key}
+
+
+@app.get("/v1/admin/tinyfish-check", dependencies=[Depends(require_admin)])
+def tinyfish_check():
+    """One cheap Search call: proves the API key and network work before the live demo."""
+    from .tinyfish.client import TinyFishError, from_settings
+    try:
+        hits = from_settings(settings).search("pothole complaint municipal corporation Delhi", location="IN")
+    except TinyFishError as e:
+        raise HTTPException(502, f"TinyFish error: {e}")
+    return {"mode": settings.tinyfish_mode, "ok": True, "results": len(hits),
+            "first": (hits[0].get("url") if hits else None), "portal_base": settings.portal_base,
+            "webhooks": settings.webhooks_enabled}
+
+
+# ------------------------------------------------- demo portal pass-through
+PORTAL_PUBLIC = {"new", "escalate", "status"}
+
+
+@app.api_route("/portal/{path:path}", methods=["GET", "POST"], include_in_schema=False)
+async def portal_proxy(path: str, request: Request):
+    """The fictional portal lives in the mock container. TinyFish's cloud browser can only reach what the
+    tunnel exposes, so the public pages are passed through here. /portal/admin is NOT exposed."""
+    import requests
+    from starlette.concurrency import run_in_threadpool
+    if path.split("/", 1)[0] not in PORTAL_PUBLIC:
+        raise HTTPException(404, "not found")
+    body = await request.body()
+    headers = {k: v for k, v in request.headers.items() if k.lower() in ("content-type", "accept", "user-agent")}
+    url = f"{settings.mock_base}/portal/{path}"
+
+    def call():
+        return requests.request(request.method, url, params=dict(request.query_params), data=body,
+                                headers=headers, allow_redirects=False, timeout=20)
+    try:
+        r = await run_in_threadpool(call)
+    except requests.RequestException as e:
+        raise HTTPException(502, f"demo portal unreachable: {e}")
+    out = Response(content=r.content, status_code=r.status_code,
+                   media_type=r.headers.get("content-type", "text/html"))
+    if "location" in r.headers:
+        out.headers["location"] = r.headers["location"]
+    return out

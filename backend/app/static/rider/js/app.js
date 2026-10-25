@@ -137,7 +137,9 @@ function mountDrive(root) {
     session.addEventListener("stats", (e) => {
       const s = e.detail;
       pills.ai.textContent = session.model ? `AI ${s.fps} fps · ${s.inferMs} ms` : "AI off";
-      pills.jolt.textContent = s.jolt == null ? "jolt n/a" : `jolt ${s.jolt.toFixed(2)} g`;
+      pills.jolt.textContent = s.jolt == null ? "jolt n/a: allow motion" :
+        `jolt ${s.jolt.toFixed(2)} g${s.bumpAt ? ` · fires ≥ ${s.bumpAt.toFixed(2)}` : ""}`;
+      pills.jolt.classList.toggle("bad", s.jolt == null);
       pills.sent.textContent = `${s.sent} sent${s.passes ? ` · ${s.passes} re-checked` : ""}`;
     });
     session.addEventListener("status", (e) => {

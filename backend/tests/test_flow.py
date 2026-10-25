@@ -16,6 +16,7 @@ os.environ["TINYFISH_MODE"] = "mock"
 os.environ["GEOCODER"] = "off"
 
 import pytest  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from app.db import SessionLocal, init_db  # noqa: E402
@@ -256,3 +257,59 @@ def test_manual_reports_and_geocode(s):
     wf.apply_geocode(s, h.id, {"road_name": "NH 44", "road_ref": "NH 44", "address": "NH 44, Alipur",
                                "city_key": "delhi", "state_key": "dl"})
     assert h.address == "NH 44, Alipur" and h.road_class == "national" and h.authority_key == "nhai"
+
+
+def test_area_memory_skips_tinyfish_for_known_roads(s):
+    """Mentor feedback: research a road's authority once, then reuse it for every pothole nearby."""
+    from app.models import AgentRun, AreaAuthority, AuditEvent
+    r1, r2, r3, r4 = riders(s, 4)
+
+    def on_marg(rider, dlat):
+        d = det(rider, dlat=dlat)
+        d.lat, d.road_name, d.address = LAT + 0.05 + dlat, "Aurobindo Marg", "Aurobindo Marg, Delhi"
+        return d
+
+    # First pothole on an arterial: rules are unsure, so TinyFish is asked once.
+    d, _ = wf.ingest_detection(s, on_marg(r1, 0.0), None)
+    _, jobs = wf.ingest_detection(s, on_marg(r2, 0.00005), None)
+    h1 = s.get(Hotspot, d.hotspot_id)
+    assert h1.state == "confirmed" and jobs_named(jobs, "roadloop.resolve_authority")
+
+    s.add(AgentRun(run_id="auth1", purpose="authority", hotspot_id=h1.id, url="https://example.gov.in", goal="g"))
+    s.flush()
+    wf.handle_run(s, {"run_id": "auth1", "status": "COMPLETED",
+                      "result": {"authority": "municipal_corporation", "authority_name": "MCD",
+                                 "evidence_url": "https://example.gov.in/roads"}})
+    assert h1.authority_key == "city_delhi"
+    mem = s.scalar(select(AreaAuthority).where(AreaAuthority.road_key == "aurobindo_marg",
+                                               AreaAuthority.source == "tinyfish"))
+    assert mem and mem.confidence == 0.9
+
+    # A second pothole ~300 m further along the same road: no TinyFish job, owner comes from memory.
+    d, _ = wf.ingest_detection(s, on_marg(r3, 0.003), None)
+    _, jobs = wf.ingest_detection(s, on_marg(r4, 0.00305), None)
+    h2 = s.get(Hotspot, d.hotspot_id)
+    assert h2.id != h1.id and h2.state == "confirmed"
+    assert not jobs_named(jobs, "roadloop.resolve_authority")
+    assert h2.authority_key == "city_delhi" and mem.hits == 1
+    assert s.scalar(select(AuditEvent).where(AuditEvent.hotspot_id == h2.id,
+                                             AuditEvent.action == "authority_from_memory"))
+
+    # An engineer's correction beats TinyFish and is what later potholes reuse.
+    wf.set_authority(s, h2.id, "demo")
+    eng = s.scalar(select(AreaAuthority).where(AreaAuthority.road_key == "aurobindo_marg",
+                                               AreaAuthority.source == "engineer"))
+    assert eng and eng.authority_key == "demo" and h2.authority_key == "demo"
+    h3 = Hotspot(lat=h2.lat + 0.0002, lon=h2.lon, geohash7="x", road_name="Aurobindo Marg", state="confirmed")
+    s.add(h3)
+    s.flush()
+    assert wf.area_lookup(s, h3).source == "engineer"
+    with pytest.raises(wf.WorkflowError):
+        wf.set_authority(s, h2.id, "no_such_portal")
+
+
+def test_geocode_cache(s):
+    assert wf.cached_place(s, 12.9716, 77.5946) is None
+    wf.remember_place(s, 12.9716, 77.5946, {"road_name": "MG Road", "city_key": "bengaluru"})
+    s.flush()
+    assert wf.cached_place(s, 12.97161, 77.59461)["road_name"] == "MG Road"   # same ~150 m cell

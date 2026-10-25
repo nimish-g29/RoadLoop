@@ -71,12 +71,16 @@ export default function App() {
       <header className="top">
         <div className="brand">
           <span className="logo">◎</span> RoadLoop <span className="muted">· Engineer queue</span>
+          {stats?.tinyfish_mode && (
+            <span className={`mode ${stats.tinyfish_mode}`}>TinyFish {stats.tinyfish_mode === "live" ? "LIVE" : "mock"}</span>
+          )}
         </div>
         <div className="kpis">
           <Kpi label="Open in queue" value={openCount} />
           <Kpi label="Open high-severity" value={stats?.open_high ?? "–"} accent />
           <Kpi label="Closures caught unfixed" value={caught} />
           <Kpi label="Median days to verified fix" value={medians.length ? Math.min(...medians) : "–"} />
+          <Kpi label="TinyFish lookups saved (area memory)" value={stats?.area_memory?.authority_reuses ?? 0} />
         </div>
         <div className="actions">
           <button className="ghost" disabled={!!busyJob} onClick={() => runJob("check_statuses")}>

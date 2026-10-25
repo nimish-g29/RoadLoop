@@ -124,3 +124,14 @@ test("GPS speed: standing still with small jitter stays slow", () => {
   for (let i = 0; i <= 6; i++) g.push({ t: i, lat: 28.5 + (i % 2) * 0.00002, lon: 77.0, speedKmh: 0, accuracy: 8 });
   assert.ok(g.last.speedKmh < 5, `got ${g.last.speedKmh}`);
 });
+
+test("hands-free: on a rough road the bar rises above the shaking, a real hit still fires", () => {
+  const buf = new JoltBuffer();
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5);
+  for (let t = 0; t < 10; t += 0.02) buf.push(t, 1.0 + 0.4 * rnd() + (t > 8 && t < 8.06 ? 1.6 : 0));
+  const trig = new JoltTrigger({ minG: 0.4, noiseK: 3.5 });
+  for (let t = 5.5; t < 7.9; t += 0.1) assert.equal(trig.check(buf, t, 30), null, `false fire at ${t}`);
+  assert.ok(trig.threshold > 0.4, `threshold ${trig.threshold}`);
+  assert.ok(trig.check(buf, 8.06, 30));
+});

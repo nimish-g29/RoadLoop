@@ -18,8 +18,9 @@ from ..core import geo, scoring
 from ..core.lifecycle import (TRACKED, Event, PassObservation as Obs, PortalStatus, State,
                               classify_status_label, decide_verification, next_state,
                               parse_portal_status, sla_breached)
-from ..core.routing import resolve_authority, road_class_from_ref
-from ..models import AgentRun, AuditEvent, Complaint, Detection, Hotspot, PassObservation, Rider
+from ..core.routing import SOURCE_RANK, pick_area_memory, resolve_authority, road_class_from_ref, road_key
+from ..models import (AgentRun, AreaAuthority, AreaPlace, AuditEvent, Complaint, Detection, Hotspot,
+                      PassObservation, Rider)
 from ..tinyfish import goals
 from ..tinyfish.client import AgentGoalFailed, TinyFish, TinyFishError
 
@@ -55,7 +56,7 @@ class WorkflowError(ValueError):
 
 
 def portals():
-    return goals.load_portals(settings.mock_base)
+    return goals.load_portals(settings.portal_base)
 
 
 # ================================================================== ingest
@@ -181,11 +182,82 @@ def compute_priority(s: Session, h: Hotspot, now: datetime | None = None) -> flo
     return scoring.priority(scoring.Severity(h.severity), h.road_class, passes, days_open)
 
 
+# ============================================================ area memory
+def _area_cell(lat: float, lon: float) -> str:
+    return geo.encode(lat, lon, settings.area_precision)
+
+
+def area_lookup(s: Session, h: Hotspot) -> AreaAuthority | None:
+    cell = _area_cell(h.lat, h.lon)
+    rows = list(s.scalars(select(AreaAuthority).where(AreaAuthority.cell.in_(geo.neighbours(cell)))))
+    return pick_area_memory(rows, cell, road_key(h.road_ref, h.road_name))
+
+
+def remember_area(s: Session, h: Hotspot, authority_key: str, confidence: float, source: str,
+                  evidence_url: str | None = None, any_road: bool = False) -> AreaAuthority:
+    """Upsert what we learned about who owns this road (or, with any_road, this whole cell).
+    A weaker source never overwrites a stronger one (engineer > TinyFish > rules)."""
+    cell = _area_cell(h.lat, h.lon)
+    key = None if any_road else road_key(h.road_ref, h.road_name)
+    row = s.scalar(select(AreaAuthority).where(AreaAuthority.cell == cell, AreaAuthority.road_key.is_(None)
+                                               if key is None else AreaAuthority.road_key == key))
+    if row is None:
+        row = AreaAuthority(cell=cell, road_key=key, hits=0)
+        s.add(row)
+    elif SOURCE_RANK.get(source, 0) < SOURCE_RANK.get(row.source, 0):
+        return row
+    row.road_name, row.city_key, row.state_key = h.road_name or h.road_ref, h.city_key, h.state_key
+    row.authority_key, row.confidence, row.source = authority_key, confidence, source
+    row.evidence_url, row.updated_at = evidence_url or row.evidence_url, now_utc()
+    s.flush()
+    return row
+
+
+def cached_place(s: Session, lat: float, lon: float) -> dict | None:
+    row = s.get(AreaPlace, geo.encode(lat, lon, 7))
+    if row:
+        row.hits += 1
+        return dict(row.place or {})
+    return None
+
+
+def remember_place(s: Session, lat: float, lon: float, place: dict) -> None:
+    if place and not s.get(AreaPlace, geo.encode(lat, lon, 7)):
+        s.add(AreaPlace(cell=geo.encode(lat, lon, 7), place=place))
+
+
 def _resolve_authority(s: Session, h: Hotspot) -> list[Job]:
+    """Area memory first (free), then the rule pass (free), then TinyFish research (paid) only if unsure."""
+    if not (h.road_name or h.road_ref or h.city_key) and settings.geocoder != "off" and not h.address:
+        # Nothing to go on yet: geocoding (free) is still running and calls back into this.
+        audit(s, h.id, "system", "authority_deferred", reason="waiting for the road name")
+        return []
+    mem = area_lookup(s, h)
+    if mem:
+        mem.hits, mem.updated_at = (mem.hits or 0) + 1, now_utc()
+        h.authority_key, h.authority_confidence = mem.authority_key, mem.confidence
+        audit(s, h.id, "system", "authority_from_memory", authority=mem.authority_key, source=mem.source,
+              confidence=mem.confidence, road=mem.road_name, reused=mem.hits)
+        return []
     r = resolve_authority(h.road_ref, h.road_name, h.city_key, h.state_key)
     h.authority_key, h.authority_confidence = r.authority_key, r.confidence
     audit(s, h.id, "system", "authority_rules", authority=r.authority_key, confidence=r.confidence, reason=r.reason)
+    if r.authority_key:
+        remember_area(s, h, r.authority_key, r.confidence, "rules")
     return [("roadloop.resolve_authority", {"hotspot_id": h.id})] if r.search_query else []
+
+
+def set_authority(s: Session, hotspot_id: str, authority_key: str, whole_area: bool = False) -> Hotspot:
+    """Engineer correction: fixes this hotspot and teaches area memory for every later pothole nearby."""
+    h = s.get(Hotspot, hotspot_id)
+    if not h:
+        raise WorkflowError("unknown hotspot")
+    if authority_key not in portals():
+        raise WorkflowError(f"unknown authority '{authority_key}'")
+    h.authority_key, h.authority_confidence = authority_key, 1.0
+    remember_area(s, h, authority_key, 1.0, "engineer", any_road=whole_area)
+    audit(s, h.id, "engineer", "authority_set", authority=authority_key, whole_area=whole_area)
+    return h
 
 
 # ============================================================ approve + file
@@ -288,6 +360,7 @@ def handle_run(s: Session, run: dict) -> list[Job]:
             key = mapping.get(res.get("authority"))
             if key:
                 h.authority_key, h.authority_confidence = key, 0.9
+                remember_area(s, h, key, 0.9, "tinyfish", evidence_url=res.get("evidence_url"))
             audit(s, h.id, f"tinyfish:{ar.run_id}", "authority_resolved", **res)
     return []
 

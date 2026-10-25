@@ -1,6 +1,6 @@
-# RoadLoop local stack.
-#   docker compose up --build              -> real TinyFish (needs TINYFISH_API_KEY in .env)
-#   TINYFISH_MODE=mock docker compose up   -> offline demo against mock_tinyfish
+# RoadLoop stack. TINYFISH_MODE in .env picks the real TinyFish API (live) or the offline mock.
+#   docker compose up -d --build
+# Every service restarts on failure; api and db have health checks; data lives in named volumes.
 services:
   db:
     image: postgis/postgis:16-3.4
@@ -8,7 +8,8 @@ services:
       POSTGRES_USER: roadloop
       POSTGRES_PASSWORD: roadloop
       POSTGRES_DB: roadloop
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
+    restart: unless-stopped
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,7 +19,8 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    restart: unless-stopped
+    ports: ["127.0.0.1:6379:6379"]
 
   api:
     build: ./backend
@@ -27,6 +29,11 @@ services:
       DATABASE_URL: postgresql+psycopg://roadloop:roadloop@db:5432/roadloop
       REDIS_URL: redis://redis:6379/0
     ports: ["8000:8000"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=4)"]
+      interval: 10s
+      retries: 6
     volumes:
       - ./backend:/app
       - ./mock_tinyfish:/mock_tinyfish:ro   # lets the API container run the client tests
@@ -46,7 +53,9 @@ services:
       - ./backend:/app
       - media:/media
     depends_on: [api]
-    command: celery -A app.worker.celery_app worker -l info --concurrency 2
+    restart: unless-stopped
+    # Scale out with: docker compose up -d --scale worker=3
+    command: sh -c "celery -A app.worker.celery_app worker -l info --concurrency $${WORKER_CONCURRENCY:-4}"
 
   beat:
     build: ./backend
@@ -57,14 +66,23 @@ services:
     volumes:
       - ./backend:/app
     depends_on: [api]
+    restart: unless-stopped
     command: celery -A app.worker.celery_app beat -l info
 
   # Offline stand-in for TinyFish + a fictional grievance portal for demos.
+  # The fictional grievance portal (+ a TinyFish stand-in used only when TINYFISH_MODE=mock).
+  # Its officer desk (http://localhost:8100/portal/admin) is local only; the public pages are also
+  # reachable through the API at /portal/... so the real TinyFish browser can file on them.
   mock:
     build: ./mock_tinyfish
+    env_file: .env
     environment:
       ROADLOOP_API: http://api:8000
+      PORTAL_DATA: /data/portal.json
     ports: ["8100:8100"]
+    restart: unless-stopped
+    volumes:
+      - portaldata:/data
 
   dashboard:
     image: node:22-alpine
@@ -73,9 +91,19 @@ services:
       - ./dashboard:/app
     environment:
       VITE_API_URL: http://localhost:8000
+      VITE_ADMIN_TOKEN: ${ADMIN_TOKEN:-}
     ports: ["5173:5173"]
+    restart: unless-stopped
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+
+  # Browse the database at http://localhost:8080 (System PostgreSQL, server db, user/pass/db roadloop).
+  adminer:
+    image: adminer
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on: [db]
+    restart: unless-stopped
 
 volumes:
   pgdata:
   media:
+  portaldata:

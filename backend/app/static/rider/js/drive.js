@@ -34,6 +34,7 @@ export class DriveSession extends EventTarget {
     this.recent = new FrameRing(2.5); // last few seconds of frames for hands-free capture
     this.bump = new JoltTrigger(config?.bump || {});
     this.lastAutoT = -Infinity;
+    this.lastBumpT = -Infinity;
   }
 
   _emitEvt(type, detail) {
@@ -146,7 +147,8 @@ export class DriveSession extends EventTarget {
       });
       this.recent.push(t, snapshot(v, 800));
       this._checkBump(t);
-      this._checkVerify(boxes.length > 0);
+      // "Still there" evidence near a re-check spot: the model sees it, or the wheel just hit it.
+      this._checkVerify(boxes.length > 0 || t - this.lastBumpT < 1.5);
       this._frames.push(t);
       while (this._frames.length && t - this._frames[0] > 2) this._frames.shift();
       this.stats.fps = Math.round((this._frames.length / 2) * 10) / 10;
@@ -185,7 +187,9 @@ export class DriveSession extends EventTarget {
     const fix = this.gps.track.last;
     const speed = fix?.speedKmh ?? null;
     const hit = this.bump.check(this.motion.buf, t, speed);
+    this.stats.bumpAt = round(this.bump.threshold, 2);
     if (!hit) return;
+    this.lastBumpT = hit.t;
     if (this.model && (this.tracker.active || t - this.lastAutoT < 3)) return;
     const f = this.recent.at(hit.t - bumpLookback(speed));
     const v = this.video;
@@ -263,7 +267,11 @@ export class DriveSession extends EventTarget {
 
   _checkVerify(sawNow) {
     const f = this.gps.track.last;
-    if (!f || !this.model || (f.accuracy || 0) > 30) return; // only a looking model + good GPS can vouch
+    if (!f || (f.accuracy || 0) > 30) return; // good GPS only
+    // Who can vouch that the road is clear: a running model, or (no model) the motion sensor while
+    // riding through the spot at speed: a pothole there would have produced a bump.
+    const moving = (f.speedKmh ?? 0) >= this.bump.minSpeedKmh;
+    if (!this.model && !(this.motion.hasData && moving)) return;
     for (const [id, v] of this.verify) {
       if (v.done) continue;
       const d = haversine(f.lat, f.lon, v.lat, v.lon);

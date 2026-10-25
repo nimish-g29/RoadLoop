@@ -146,3 +146,32 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String(60))
     detail: Mapped[Any] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AreaAuthority(Base):
+    """Area memory: which authority maintains a road around here. Learned once (rules, TinyFish or an
+    engineer's correction) and reused for every later pothole nearby, so TinyFish only researches
+    roads RoadLoop has never seen and the agent just files."""
+    __tablename__ = "area_authorities"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    cell: Mapped[str] = mapped_column(String(8), index=True)                 # geohash, AREA_PRECISION
+    road_key: Mapped[str | None] = mapped_column(String(120), index=True)    # "nh44" / "aurobindo_marg"; None = any road
+    road_name: Mapped[str | None] = mapped_column(String(200))
+    city_key: Mapped[str | None] = mapped_column(String(40))
+    state_key: Mapped[str | None] = mapped_column(String(8))
+    authority_key: Mapped[str] = mapped_column(String(40))
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    source: Mapped[str] = mapped_column(String(16))                          # rules | tinyfish | engineer
+    evidence_url: Mapped[str | None] = mapped_column(String(500))
+    hits: Mapped[int] = mapped_column(Integer, default=0)                    # reuses = TinyFish runs saved
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AreaPlace(Base):
+    """Reverse-geocoding cache per ~150 m cell, so a busy road is geocoded once, not per pothole."""
+    __tablename__ = "area_places"
+    cell: Mapped[str] = mapped_column(String(8), primary_key=True)          # geohash precision 7
+    place: Mapped[Any] = mapped_column(JSON)
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -69,7 +69,8 @@ class Demo:
     def hotspot(self, hid: str) -> dict:
         return requests.get(f"{self.api}/v1/hotspots/{hid}").json()
 
-    def wait_state(self, hid: str, states: set[str], timeout: float = 90) -> dict:
+    def wait_state(self, hid: str, states: set[str], timeout: float = 300) -> dict:
+        # 300 s: a real TinyFish agent filing a form takes one to a few minutes.
         t0 = time.time()
         while time.time() - t0 < timeout:
             h = self.hotspot(hid)

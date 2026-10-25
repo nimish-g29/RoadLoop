@@ -33,6 +33,25 @@ class Settings:
     geocoder_user_agent: str = field(default_factory=lambda: _env(
         "GEOCODER_USER_AGENT", "RoadLoop-hackathon/0.1 (HackIIITD demo)"))
     verify_radius_m: float = field(default_factory=lambda: float(_env("VERIFY_RADIUS_M", "25")))
+    # Optional: when set, /v1/admin/* needs the header X-Admin-Token (the dashboard sends it).
+    admin_token: str = field(default_factory=lambda: _env("ADMIN_TOKEN"))
+    # Area memory: reuse a known authority for new potholes within this geohash precision
+    # (6 = cells about 1.2 x 0.6 km, plus neighbours) instead of asking TinyFish again.
+    area_precision: int = field(default_factory=lambda: int(_env("AREA_PRECISION", "6")))
+    # Hands-free jolt capture on the phone (sent to the rider app via /v1/config).
+    bump_min_g: float = field(default_factory=lambda: float(_env("BUMP_MIN_G", "0.4")))
+    bump_noise_k: float = field(default_factory=lambda: float(_env("BUMP_NOISE_K", "3.5")))
+    bump_min_speed_kmh: float = field(default_factory=lambda: float(_env("BUMP_MIN_SPEED_KMH", "8")))
+
+    @property
+    def portal_base(self) -> str:
+        """Where the fictional demo portal is reached by whoever files on it.
+        mock: the mock container over the compose network. live: TinyFish's cloud browser must
+        reach it from the internet, so it goes through the API's /portal proxy on the tunnel."""
+        explicit = _env("PORTAL_BASE_URL")
+        if explicit:
+            return explicit.rstrip("/")
+        return self.mock_base if self.tinyfish_mode == "mock" else self.public_base_url
 
     @property
     def agent_base(self) -> str:
