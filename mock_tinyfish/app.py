@@ -50,7 +50,8 @@ def _auth(request: Request) -> JSONResponse | None:
 # ------------------------------------------------------------- fake portal
 # Complaints persist to a JSON file (a docker volume) so the officer desk survives restarts.
 DATA_FILE = os.environ.get("PORTAL_DATA", "/data/portal.json")
-STATUSES = ("Pending", "Under Process", "Closed", "Rejected")
+STATUSES = ("Pending", "Under Process", "Closed", "Escalated", "Rejected")
+_CID = re.compile(r"DMG-\d{4}-\d{6}")
 
 
 def _save() -> None:
@@ -107,7 +108,7 @@ button,.btn{background:var(--brand);color:#fff;border:0;border-radius:6px;paddin
 button.light{background:#e8eef5;color:var(--brand)}.muted{color:var(--muted)}.mono{font-family:ui-monospace,Consolas,monospace}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}@media(max-width:720px){.grid2{grid-template-columns:1fr}}
 .badge{display:inline-block;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:700}
-.b-Pending{background:#eef1f5;color:#3d4757}.b-Under{background:#fff1d6;color:#8a5a00}.b-Closed{background:#dff3e4;color:#1d6b35}.b-Rejected{background:#fde2e1;color:#9b1c1c}
+.b-Pending{background:#eef1f5;color:#3d4757}.b-Under{background:#fff1d6;color:#8a5a00}.b-Closed{background:#dff3e4;color:#1d6b35}.b-Rejected{background:#fde2e1;color:#9b1c1c}.b-Escalated{background:#fde8d7;color:#9a3412}
 .kpis{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}.kpi{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 16px;min-width:130px}
 .kpi b{display:block;font-size:24px}.kpi span{font-size:13px;color:var(--muted)}
 .tabs a{display:inline-block;padding:6px 12px;border-radius:99px;border:1px solid var(--line);margin-right:6px;text-decoration:none;color:var(--ink);background:#fff;font-size:13px}
@@ -157,6 +158,8 @@ async def portal_new(request: Request):
     form = await request.form()
     fields = {k: (v if isinstance(v, str) else f"<file {getattr(v, 'filename', '')}>") for k, v in form.items()}
     cid = new_complaint(fields, kind="escalation" if escalation else "grievance")
+    if escalation:
+        _link_escalation(cid)
     what = "Escalation" if escalation else "Grievance"
     return page("Submitted", f"""<div class=card><div class=ok><h2>{what} registered successfully</h2>
 <p>Complaint No: <span class=big id=complaint-id>{cid}</span></p>
@@ -164,6 +167,19 @@ async def portal_new(request: Request):
 
 
 portal_escalate = portal_new
+
+
+def _link_escalation(cid: str) -> None:
+    """An escalation names the complaint it escalates: mark that one Escalated and link both ways."""
+    text = " ".join(str(v) for v in COMPLAINTS[cid]["fields"].values())
+    parent = next((m for m in _CID.findall(text) if m != cid and m in COMPLAINTS), None)
+    if not parent:
+        return
+    p = COMPLAINTS[parent]
+    p["status"], p["remarks"], p["escalated_to"] = "Escalated", f"Reopened: road users still report the pothole. Escalated as {cid}", cid
+    p["history"].append(["Escalated", now(), f"Escalated as {cid}"])
+    COMPLAINTS[cid]["escalates"] = parent
+    _save()
 
 
 async def portal_status_lookup(request: Request):
@@ -206,6 +222,10 @@ def _ticket(c: dict) -> str:
                    f"{' · ' + html.escape(h[2]) if len(h) > 2 and h[2] else ''}</li>" for h in c["history"])
     opts = "".join(f"<option {'selected' if s == c['status'] else ''}>{s}</option>" for s in STATUSES)
     kind = "Escalation" if c.get("kind") == "escalation" else "Grievance"
+    if c.get("escalates"):
+        kind += f" of <a href='#{c['escalates']}'>{c['escalates']}</a>"
+    if c.get("escalated_to"):
+        kind += f" · escalated as <a href='#{c['escalated_to']}'>{c['escalated_to']}</a>"
     return f"""<div class='card ticket' id='{c['id']}'>{img}
 <div><div><b class=mono>{c['id']}</b> {_badge(c['status'])} <span class=muted>· {kind} · {html.escape(c['created_at'][:16].replace('T', ' '))} UTC</span></div>
 <div><b>{html.escape(f.get('subject') or f.get('category') or 'Roads > Potholes')}</b></div>

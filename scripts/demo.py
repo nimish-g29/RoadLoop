@@ -122,11 +122,17 @@ class Demo:
         print(f"  reopened and escalated to {esc['portal_key']} (level {h['escalation_level']})")
         print(f"  evidence sent: {esc['reason']}")
         h = self.wait_state(hid, {"escalated"})
-        for _ in range(40):
+        t0 = time.time()  # a real TinyFish agent takes 1-3 minutes to file the escalation
+        while True:
             h = self.hotspot(hid)
-            if h["complaints"][-1]["status"] == "filed":
+            esc_c = h["complaints"][-1]
+            if esc_c["status"] == "filed" and esc_c.get("portal_complaint_id"):
                 break
-            time.sleep(1.5)
+            if esc_c["status"] in ("failed", "needs_human"):
+                raise SystemExit(f"escalation {esc_c['status']}: {esc_c.get('needs_human_reason')}")
+            if time.time() - t0 > 300:
+                raise SystemExit("escalation not filed after 5 min. Check: docker compose logs worker")
+            time.sleep(2)
         print(f"  escalation complaint {h['complaints'][-1]['portal_complaint_id']}")
 
         self.act("Act 5: escalation resolved; two riders pass a smooth road")
